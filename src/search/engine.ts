@@ -6,6 +6,7 @@ export interface SearchOptions {
   maxLength: number;
   resultLimit: number;
   maxCandidates: number;
+  watchCandidatesLimit: number;
   durationMs: number;
   intervalMs: number;
 }
@@ -25,6 +26,7 @@ export interface SearchProgress {
 
 export interface SearchSummary extends SearchProgress {
   results: AvailableCandidate[];
+  occupiedCandidates: Candidate[];
   startedAt: string;
   finishedAt: string;
   elapsedMs: number;
@@ -62,6 +64,7 @@ export async function runDeepSearch(
   };
 
   const results: AvailableCandidate[] = [];
+  const occupiedCandidates: Candidate[] = [];
   let stopReason: SearchSummary["stopReason"] = "candidate_pool_exhausted";
   let floodWaitSeconds: number | undefined;
   let lastProgressAt = Date.now();
@@ -87,6 +90,7 @@ export async function runDeepSearch(
         results.push({ ...candidate, checkedAt: check.checkedAt });
       } else if (check.status === "OCCUPIED") {
         progress.occupied += 1;
+        occupiedCandidates.push(candidate);
       } else if (check.status === "PURCHASE_REQUIRED") {
         progress.purchaseRequired += 1;
       } else if (check.status === "COLLECTIBLE_ONLY") {
@@ -124,10 +128,12 @@ export async function runDeepSearch(
 
   await onProgress?.({ ...progress });
   results.sort((left, right) => right.score.total - left.score.total);
+  occupiedCandidates.sort((left, right) => right.score.total - left.score.total);
 
   return {
     ...progress,
     results: results.slice(0, options.resultLimit),
+    occupiedCandidates: occupiedCandidates.slice(0, options.watchCandidatesLimit),
     startedAt,
     finishedAt: new Date().toISOString(),
     elapsedMs: Date.now() - startedClock,

@@ -15,7 +15,9 @@ const envSchema = z.object({
   CHECK_INTERVAL_MS: z.coerce.number().int().min(1_000).max(10_000).default(1_500),
   SEARCH_DURATION_MS: z.coerce.number().int().min(10_000).max(600_000).default(600_000),
   MAX_CANDIDATES: z.coerce.number().int().min(100).max(20_000).default(6_000),
-  MAX_RESULTS: z.coerce.number().int().min(1).max(50).default(15)
+  MAX_RESULTS: z.coerce.number().int().min(1).max(50).default(15),
+  WATCH_INTERVAL_MS: z.coerce.number().int().min(3_600_000).max(604_800_000).default(21_600_000),
+  WATCH_MAX_ENTRIES: z.coerce.number().int().min(10).max(500).default(150)
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -40,7 +42,9 @@ export const config = {
   checkIntervalMs: values.CHECK_INTERVAL_MS,
   searchDurationMs: values.SEARCH_DURATION_MS,
   maxCandidates: values.MAX_CANDIDATES,
-  maxResults: values.MAX_RESULTS
+  maxResults: values.MAX_RESULTS,
+  watchIntervalMs: values.WATCH_INTERVAL_MS,
+  watchMaxEntries: values.WATCH_MAX_ENTRIES
 };
 
 export function requireBotToken(): string {

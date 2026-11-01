@@ -1,14 +1,17 @@
 import { TelegramUsernameChecker } from "./telegram/checker.js";
 import { createAuthorizedTelegramClient } from "./telegram/client.js";
 import { createBot, startBot } from "./bot.js";
+import { startReleaseMonitor } from "./monitor/release-monitor.js";
 
 async function main(): Promise<void> {
   const client = await createAuthorizedTelegramClient();
   const checker = new TelegramUsernameChecker(client);
   const bot = createBot(checker);
+  const stopReleaseMonitor = startReleaseMonitor(bot, checker);
 
   const shutdown = async (signal: string) => {
     console.log("Received " + signal + ", shutting down.");
+    stopReleaseMonitor();
     await bot.stop();
     await client.disconnect();
     process.exit(0);

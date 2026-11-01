@@ -5,6 +5,8 @@ dist/
 !.env.example
 data/search-history.json
 data/search-history.json.tmp
+data/watchlist.json
+data/watchlist.json.tmp
 *.session
 *.log
 coverage/

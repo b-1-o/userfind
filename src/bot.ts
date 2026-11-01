@@ -2,6 +2,11 @@ import { Bot, Context } from "grammy";
 import { config, requireBotToken } from "./config.js";
 import { SearchProgress, runDeepSearch } from "./search/engine.js";
 import { appendSearchHistory } from "./storage/result-store.js";
+import {
+  mergeWatchedCandidates,
+  readWatchlist,
+  removeWatchedUsername
+} from "./storage/watch-store.js";
 import { TelegramUsernameChecker } from "./telegram/checker.js";
 
 function isOwner(ctx: Context): boolean {
@@ -77,6 +82,8 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
         "/find — deep search (default lengths 5–8)",
         "/find 5-7 15 — choose length range and result count",
         "/check username — check one name",
+        "/watchlist — names monitored for future release",
+        "/unwatch username — stop monitoring a name",
         "/id — show your Telegram numeric ID",
         "/help — help",
         "",
@@ -97,13 +104,60 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
         "/find — search lengths 5–8",
         "/find 5-7 20 — search lengths 5–7 and return up to 20 matches",
         "/check @username — check one username",
-        "/id — show your numeric Telegram ID",
+        "/watchlist — see occupied names monitored for release",
+        "/unwatch username — remove a name from monitoring",
+        "/id — show your numeric Telegram user ID",
         "",
         "A name is shown as FREE only if Telegram's account.checkUsername returns true.",
-        "Purchase-required, occupied, invalid and unknown names are never shown as free.",
+        "Occupied high-quality candidates are monitored and rechecked every few hours.",
+        "Inactivity is not treated as proof of availability.",
         "A successful check does not reserve the username; claim it immediately in Telegram."
       ].join("\n")
     );
+  });
+
+  bot.command("watchlist", async (ctx) => {
+    if (!isOwner(ctx)) {
+      await ctx.reply("Search access is private. Add your numeric Telegram ID to BOT_ALLOWED_USER_IDS in .env.");
+      return;
+    }
+
+    const entries = await readWatchlist();
+    if (!entries.length) {
+      await ctx.reply("Your release watchlist is empty. Run /find to discover and track high-quality occupied candidates.");
+      return;
+    }
+
+    const lines = [
+      "Release watchlist",
+      "These names are currently occupied. UserFind rechecks them periodically; it does not infer inactivity."
+    ];
+    entries.slice(0, 40).forEach((entry, index) => {
+      lines.push(
+        "",
+        (index + 1) + ". @" + entry.username + " — quality " + entry.score + "/100",
+        "Added: " + entry.addedAt
+      );
+    });
+    if (entries.length > 40) lines.push("", "Showing 40 of " + entries.length + " tracked names.");
+    lines.push("", "Use /unwatch username to remove one.");
+    await ctx.reply(lines.join("\n"));
+  });
+
+  bot.command("unwatch", async (ctx) => {
+    if (!isOwner(ctx)) {
+      await ctx.reply("Search access is private. Add your numeric Telegram ID to BOT_ALLOWED_USER_IDS in .env.");
+      return;
+    }
+
+    const username = String(ctx.match ?? "").trim().replace(/^@/, "").toLowerCase();
+    if (!username) {
+      await ctx.reply("Usage: /unwatch username");
+      return;
+    }
+
+    const removed = await removeWatchedUsername(username);
+    await ctx.reply(removed ? "Removed @" + username + " from the release watchlist." : "@" + username + " was not on the watchlist.");
   });
 
   bot.command("check", async (ctx) => {
@@ -167,6 +221,7 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
           maxLength: args.maxLength,
           resultLimit: args.resultLimit,
           maxCandidates: config.maxCandidates,
+          watchCandidatesLimit: config.watchMaxEntries,
           durationMs: config.searchDurationMs,
           intervalMs: config.checkIntervalMs
         },
@@ -178,6 +233,7 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
       );
 
       await appendSearchHistory(summary);
+      const watchedCount = await mergeWatchedCandidates(summary.occupiedCandidates, config.watchMaxEntries);
 
       const lines = [
         "UserFind Deep Hunt finished",
@@ -189,6 +245,8 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
         "Unknown: " + summary.unknown,
         "Four-character collectible-only skipped: " + summary.collectibleOnly,
         "Generated candidates: " + summary.candidatesGenerated,
+        "Names kept under release monitoring: " + watchedCount,
+        "Recheck interval: " + Math.round(config.watchIntervalMs / 3_600_000) + " hours",
         "Elapsed: " + Math.round(summary.elapsedMs / 1000) + " seconds"
       ];
 
@@ -238,7 +296,9 @@ export async function startBot(bot: Bot): Promise<void> {
     { command: "start", description: "Start UserFind" },
     { command: "find", description: "Find free usernames" },
     { command: "check", description: "Check one username" },
-    { command: "id", description: "Show your Telegram numeric ID" },
+    { command: "watchlist", description: "Show watched occupied usernames" },
+    { command: "unwatch", description: "Remove a username from monitoring" },
+    { command: "id", description: "Show your numeric Telegram ID" },
     { command: "help", description: "Show help" }
   ]);
 

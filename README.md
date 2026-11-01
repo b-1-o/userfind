@@ -4,11 +4,11 @@ Quality-first Telegram username discovery.
 
 UserFind generates meaningful words, brandable candidates and visual variants, ranks them locally, then asks Telegram whether each candidate is available as a free Basic username. A name is shown as **FREE** only when Telegram confirms it.
 
-## Telegram rules that shape the checker
+## Telegram rules
 
 - Telegram's official Basic username checker accepts 5–32 characters.
 - Four-character Telegram usernames are collectible-only and cannot be claimed as free Basic usernames.
-- Telegram error USERNAME_PURCHASE_AVAILABLE means the username can be purchased on Fragment. It is **not free**.
+- USERNAME_PURCHASE_AVAILABLE means a username may be acquired through Fragment. It is **not free** and is excluded from free results.
 - A successful check is a point-in-time result, not a reservation.
 - Inactivity is not evidence that a username is abandoned or reclaimable. Only Telegram's live availability response can make it a free result.
 
@@ -20,25 +20,27 @@ Official references:
 
 - Node.js 22 + TypeScript
 - grammY for the bot interface
-- GramJS for the authorized MTProto read-only checker
+- teleproto for authorized MTProto read-only checks
 - Zod + dotenv for configuration
 - Vitest + GitHub Actions for tests and CI
-- Atomic JSON history file for the first version
+- Atomic JSON files for local search history and release watchlist
 
-## What is implemented
+## Implemented
 
 - Curated English word candidates.
 - Brandable combinations and pronounceable constructions.
-- One-letter visual alternatives, including lowercase l -> i.
-- Quality scoring for lexical quality, pronunciation, visual simplicity, length rarity and brandability.
+- Visual variants, including lowercase l -> i.
+- Quality heuristic for lexical quality, pronunciation, visual simplicity, length rarity and brandability.
 - Sequential Telegram checks with configurable delay.
 - Explicit handling for occupied, purchase-required, invalid, collectible-only and unknown results.
 - Flood-wait handling: a scan stops instead of trying to bypass Telegram's limit.
-- A Telegram bot with /find, /check, /id and /help.
-- Owner-only access to checks and scans.
-- Local search history.
+- A Telegram bot with /find, /check, /watchlist, /unwatch, /id and /help.
+- Owner-only access to search and check operations.
+- Automatic release watch: the best occupied candidates from searches are saved and rechecked every six hours by default. If Telegram later confirms one is free, the bot notifies the owner and removes it from the watchlist.
 
-The current quality score is a discovery heuristic, not a market-price estimate. Verified sales-data ingestion and comparable-sale valuation are a separate next milestone; the bot does not invent a price or call an attractive name an investment.
+The release watch does not inspect private activity or label accounts as abandoned. It only notices when Telegram's actual availability response changes.
+
+The current quality score is a discovery heuristic, not a market-price estimate. The bot does not invent sale prices or call an attractive name an investment.
 
 ## Requirements
 
@@ -61,20 +63,22 @@ The current quality score is a discovery heuristic, not a market-price estimate.
 
    npm run auth
 
-   The script prints a TG_SESSION value. Paste it into your local .env only. Do not send it to anyone and do not commit it.
+   The script prints a TG_SESSION value. Paste it into your local .env only. Never send it to anyone and never commit it.
 
 5. Start the bot:
 
    npm run dev
 
-6. Send /id to your bot. Copy the numeric ID into BOT_ALLOWED_USER_IDS in .env, restart the bot, then use /find.
+6. Send /id to the bot. Copy the numeric ID into BOT_ALLOWED_USER_IDS in .env, restart the bot, then use /find.
 
 ## Commands
 
 - /start — introduction
-- /find — default deep search for lengths 5–8, up to 10 minutes
+- /find — deep search for lengths 5–8, up to 10 minutes
 - /find 5-7 20 — search lengths 5–7 and return up to 20 results
-- /check username — check one candidate
+- /check username — check one candidate immediately
+- /watchlist — view the best occupied names being monitored
+- /unwatch username — stop monitoring a name
 - /id — show your Telegram numeric user ID
 - /help — command reference
 
@@ -82,21 +86,31 @@ The current quality score is a discovery heuristic, not a market-price estimate.
 
 Candidates are ranked before any Telegram requests. Checks run one at a time with a conservative interval. If Telegram returns FLOOD_WAIT, the scan stops and reports the requested wait period. Do not reduce the delay to try to bypass restrictions.
 
-The 4-character category is intentionally not presented as free availability: it requires a collectible username and is outside this free-claim scanner. If a 5–32 character name returns USERNAME_PURCHASE_AVAILABLE, UserFind labels it purchase-required and excludes it from free results.
+Four-character names are not free Basic usernames and are excluded from the free-claim results. If a 5–32 character name returns USERNAME_PURCHASE_AVAILABLE, UserFind labels it purchase-required and excludes it from free results.
 
-Visual mutation uses lowercase l -> i. Uppercase I is not a separate variant because Telegram usernames are case-insensitive. Digit substitutions are not enabled by default because they often reduce readability and quality.
+Visual mutation uses lowercase l -> i. Uppercase I is not a separate variant because Telegram usernames are case-insensitive. Numeric substitutions are not generated by default because they often reduce readability.
+
+## Configuration
+
+See .env.example. Important settings:
+
+- CHECK_INTERVAL_MS: delay between MTProto checks; default 1500.
+- SEARCH_DURATION_MS: maximum duration of a deep search; default 600000 (10 minutes).
+- MAX_CANDIDATES: maximum locally ranked candidate pool; default 6000.
+- WATCH_INTERVAL_MS: release-watch cycle interval; default 21600000 (6 hours).
+- WATCH_MAX_ENTRIES: maximum high-quality occupied names retained; default 150.
 
 ## Security
 
 - Never commit .env, TG_SESSION, bot tokens or API hashes.
 - Keep BOT_ALLOWED_USER_IDS restricted to your own numeric Telegram ID.
 - The checker only calls account.checkUsername. It does not assign names, change account settings, or take control of another account.
-- Do not share the MTProto session string. Anyone who gets it may gain access to the Telegram account that created it.
+- A StringSession is a long-lived account credential. Anyone holding it may access the associated Telegram account. Treat it like a password.
 - Use the checker account only for this read-only purpose.
 
 ## Current limitations
 
-- A successful availability check can become stale immediately; Telegram does not reserve a username during search.
-- An inactive-looking account cannot be reclaimed by this tool.
-- The initial word list and constructed-name library are deliberately curated and finite. Expand them with properly licensed dictionaries and reviewed word lists.
-- Market value is not yet computed. The quality score is not a price forecast.
+- A successful availability check can become stale immediately; Telegram does not reserve a username.
+- The watchlist monitors candidates previously checked as occupied; it cannot predict when Telegram will release a name.
+- The initial dictionary and constructed-name library are finite and need expansion with properly licensed, higher-coverage lexical data.
+- Market valuation based on comparable collectible sales is not implemented. The quality heuristic is not a price forecast.
