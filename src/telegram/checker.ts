@@ -1,4 +1,5 @@
-import { Api, TelegramClient } from "telegram";
+import { Api, TelegramClient } from "teleproto";
+import { FloodWaitError } from "teleproto/errors";
 
 export type UsernameStatus =
   | "AVAILABLE"
@@ -50,16 +51,6 @@ function getErrorText(error: unknown): string {
   return String(error);
 }
 
-function getFloodWaitSeconds(error: unknown, message: string): number {
-  if (error && typeof error === "object") {
-    const seconds = (error as { seconds?: unknown }).seconds;
-    if (typeof seconds === "number" && Number.isFinite(seconds)) return Math.max(1, seconds);
-  }
-
-  const match = message.match(/FLOOD_WAIT_([0-9]+)/i) ?? message.match(/wait of ([0-9]+) seconds/i);
-  return match ? Math.max(1, Number(match[1])) : 60;
-}
-
 export class TelegramUsernameChecker {
   constructor(private readonly client: TelegramClient) {}
 
@@ -73,7 +64,7 @@ export class TelegramUsernameChecker {
         status: "INVALID",
         claimable: false,
         checkedAt,
-        detail: "Telegram usernames must start with a letter and contain 5–32 letters, digits or underscores."
+        detail: "Telegram Basic usernames must start with a letter and contain 5–32 letters, digits or underscores."
       };
     }
 
@@ -121,11 +112,15 @@ export class TelegramUsernameChecker {
         detail: "Telegram returned an unrecognized response. This is not treated as available."
       };
     } catch (error) {
+      if (error instanceof FloodWaitError) {
+        throw new TelegramFloodWaitError(error.seconds);
+      }
+
       const message = getErrorText(error);
       const classification = classifyTelegramError(message);
 
       if (classification === "FLOOD_WAIT") {
-        throw new TelegramFloodWaitError(getFloodWaitSeconds(error, message));
+        throw new TelegramFloodWaitError(60);
       }
 
       const detailByStatus: Record<Exclude<UsernameStatus, "AVAILABLE" | "COLLECTIBLE_ONLY">, string> = {

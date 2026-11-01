@@ -1,5 +1,5 @@
-import { TelegramClient } from "telegram";
-import { StringSession } from "telegram/sessions";
+import { TelegramClient } from "teleproto";
+import { StringSession } from "teleproto/sessions";
 import { config, requireTelegramCredentials, requireTelegramSession } from "../config.js";
 
 export async function createAuthorizedTelegramClient(): Promise<TelegramClient> {
@@ -13,17 +13,25 @@ export async function createAuthorizedTelegramClient(): Promise<TelegramClient> 
     {
       connectionRetries: 5,
       autoReconnect: true,
-      requestRetries: 2
+      requestRetries: 2,
+      floodSleepThreshold: 0
     }
   );
 
   await client.connect();
 
-  const authorized = await client.checkAuthorization();
-  if (!authorized) {
+  try {
+    // A saved session is valid only if an authenticated account call succeeds.
+    await client.getMe();
+  } catch (error) {
     await client.disconnect();
-    throw new Error("The saved Telegram session is not authorized. Run npm run auth again.");
+    throw new Error(
+      "The saved Telegram session is not authorized or has expired. Run npm run auth again. " +
+      (error instanceof Error ? error.message : String(error))
+    );
   }
+
+  client.setLogLevel("warn");
 
   if (!config.allowedUserIds.size) {
     console.warn("BOT_ALLOWED_USER_IDS is empty. Search/check commands will be locked until an owner ID is configured.");
