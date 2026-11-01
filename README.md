@@ -1,54 +1,102 @@
 # UserFind
 
-**Quality-first Telegram username discovery.**
+Quality-first Telegram username discovery.
 
-UserFind ranks meaningful, memorable, visually clean username candidates, then checks each candidate against Telegram through an authorized MTProto user session. It only reports a name as **free to claim** when Telegram's account.checkUsername method explicitly confirms availability.
+UserFind generates meaningful words, brandable candidates and visual variants, ranks them locally, then asks Telegram whether each candidate is available as a free Basic username. A name is shown as **FREE** only when Telegram confirms it.
 
-## Important Telegram rules
+## Telegram rules that shape the checker
 
-- Basic usernames are 5–32 characters and accept Latin letters, digits and underscores.
-- Four-character usernames are collectible-only; they cannot be claimed as ordinary free usernames.
-- USERNAME_PURCHASE_AVAILABLE means the username is purchasable on Fragment, not freely claimable.
-- A successful check is a point-in-time result, not a reservation. Another person may claim the name immediately.
-- Inactive-looking accounts are not proof that a username is abandoned or reclaimable. UserFind never tries to take over accounts, bypass Telegram restrictions, or infer availability from inactivity.
+- Telegram's official Basic username checker accepts 5–32 characters.
+- Four-character Telegram usernames are collectible-only and cannot be claimed as free Basic usernames.
+- Telegram error USERNAME_PURCHASE_AVAILABLE means the username can be purchased on Fragment. It is **not free**.
+- A successful check is a point-in-time result, not a reservation.
+- Inactivity is not evidence that a username is abandoned or reclaimable. Only Telegram's live availability response can make it a free result.
 
 Official references:
 - https://core.telegram.org/method/account.checkUsername
 - https://core.telegram.org/api/fragment
 
-## Current implementation
+## Stack
 
-This repository is being bootstrapped with:
-- TypeScript + Node.js
-- grammY Telegram bot interface
-- GramJS MTProto read-only availability checks
-- Candidate discovery from curated words, brandable fragments and visual mutations (l -> i)
-- Quality-first ranking
-- Serial checks with conservative pacing and FLOOD_WAIT handling
-- Local JSON result history (no database service required for the first version)
+- Node.js 22 + TypeScript
+- grammY for the bot interface
+- GramJS for the authorized MTProto read-only checker
+- Zod + dotenv for configuration
+- Vitest + GitHub Actions for tests and CI
+- Atomic JSON history file for the first version
+
+## What is implemented
+
+- Curated English word candidates.
+- Brandable combinations and pronounceable constructions.
+- One-letter visual alternatives, including lowercase l -> i.
+- Quality scoring for lexical quality, pronunciation, visual simplicity, length rarity and brandability.
+- Sequential Telegram checks with configurable delay.
+- Explicit handling for occupied, purchase-required, invalid, collectible-only and unknown results.
+- Flood-wait handling: a scan stops instead of trying to bypass Telegram's limit.
+- A Telegram bot with /find, /check, /id and /help.
+- Owner-only access to checks and scans.
+- Local search history.
+
+The current quality score is a discovery heuristic, not a market-price estimate. Verified sales-data ingestion and comparable-sale valuation are a separate next milestone; the bot does not invent a price or call an attractive name an investment.
+
+## Requirements
+
+- Node.js 22.12 or newer
+- Telegram bot token from @BotFather
+- Telegram API ID and API hash from https://my.telegram.org
+- A private MTProto session for the checker account
 
 ## Setup
 
-Requirements: Node.js 22+, a Telegram bot token, and Telegram API credentials for an authorized user session.
+1. Clone the repository and install dependencies:
 
-1. Install dependencies: npm install
-2. Copy .env.example to .env and fill in the credentials.
-3. Create an MTProto session: npm run auth
-4. Start the bot: npm run dev
+   npm install
+
+2. Copy .env.example to .env.
+
+3. Add BOT_TOKEN, TG_API_ID and TG_API_HASH.
+
+4. Create the MTProto session:
+
+   npm run auth
+
+   The script prints a TG_SESSION value. Paste it into your local .env only. Do not send it to anyone and do not commit it.
+
+5. Start the bot:
+
+   npm run dev
+
+6. Send /id to your bot. Copy the numeric ID into BOT_ALLOWED_USER_IDS in .env, restart the bot, then use /find.
 
 ## Commands
 
 - /start — introduction
-- /find — deep search (defaults to 5–8 characters, up to 10 minutes)
-- /find 5-7 15 — search lengths 5–7 and return up to 15 results
-- /check username — check one username
-- /help — usage
+- /find — default deep search for lengths 5–8, up to 10 minutes
+- /find 5-7 20 — search lengths 5–7 and return up to 20 results
+- /check username — check one candidate
+- /id — show your Telegram numeric user ID
+- /help — command reference
 
-Only real Telegram-confirmed free-to-claim names appear in the available-results section. Collectible purchase-required names and unknown results are never counted as free.
+## Search behavior
+
+Candidates are ranked before any Telegram requests. Checks run one at a time with a conservative interval. If Telegram returns FLOOD_WAIT, the scan stops and reports the requested wait period. Do not reduce the delay to try to bypass restrictions.
+
+The 4-character category is intentionally not presented as free availability: it requires a collectible username and is outside this free-claim scanner. If a 5–32 character name returns USERNAME_PURCHASE_AVAILABLE, UserFind labels it purchase-required and excludes it from free results.
+
+Visual mutation uses lowercase l -> i. Uppercase I is not a separate variant because Telegram usernames are case-insensitive. Digit substitutions are not enabled by default because they often reduce readability and quality.
 
 ## Security
 
-- Never commit .env, MTProto session strings, bot tokens or API hashes.
-- Use a separate Telegram account for the read-only checker if appropriate.
-- The MTProto checker only calls account.checkUsername; it does not change account settings or assign usernames.
-- Keep the bot and checker session private. A leaked MTProto session can grant access to a Telegram account.
+- Never commit .env, TG_SESSION, bot tokens or API hashes.
+- Keep BOT_ALLOWED_USER_IDS restricted to your own numeric Telegram ID.
+- The checker only calls account.checkUsername. It does not assign names, change account settings, or take control of another account.
+- Do not share the MTProto session string. Anyone who gets it may gain access to the Telegram account that created it.
+- Use the checker account only for this read-only purpose.
+
+## Current limitations
+
+- A successful availability check can become stale immediately; Telegram does not reserve a username during search.
+- An inactive-looking account cannot be reclaimed by this tool.
+- The initial word list and constructed-name library are deliberately curated and finite. Expand them with properly licensed dictionaries and reviewed word lists.
+- Market value is not yet computed. The quality score is not a price forecast.

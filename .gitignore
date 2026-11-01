@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+data/search-history.json
+data/search-history.json.tmp
+*.session
+*.log
+coverage/
+.DS_Store

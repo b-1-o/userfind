@@ -1,0 +1,248 @@
+import { Bot, Context } from "grammy";
+import { config, requireBotToken } from "./config.js";
+import { SearchProgress, runDeepSearch } from "./search/engine.js";
+import { appendSearchHistory } from "./storage/result-store.js";
+import { TelegramUsernameChecker } from "./telegram/checker.js";
+
+function isOwner(ctx: Context): boolean {
+  const userId = ctx.from?.id;
+  return typeof userId === "number" && config.allowedUserIds.has(userId);
+}
+
+function parseFindArguments(raw: string): { minLength: number; maxLength: number; resultLimit: number } {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { minLength: 5, maxLength: 8, resultLimit: config.maxResults };
+  }
+
+  const match = trimmed.match(/^([0-9]{1,2})\s*-\s*([0-9]{1,2})(?:\s+([0-9]{1,2}))?$/);
+  if (!match) {
+    throw new Error("Use /find 5-8 or /find 5-8 20. The last number is the maximum results.");
+  }
+
+  const minLength = Number(match[1]);
+  const maxLength = Number(match[2]);
+  const requestedLimit = match[3] ? Number(match[3]) : config.maxResults;
+
+  if (minLength < 4 || maxLength > 32 || minLength > maxLength) {
+    throw new Error("Length range must be between 4 and 32, with minimum not greater than maximum.");
+  }
+
+  return {
+    minLength,
+    maxLength,
+    resultLimit: Math.min(50, Math.max(1, requestedLimit))
+  };
+}
+
+function progressText(progress: SearchProgress): string {
+  return [
+    "UserFind Deep Hunt is running…",
+    "Checked: " + progress.checked,
+    "Free and confirmed: " + progress.available,
+    "Occupied: " + progress.occupied,
+    "Fragment purchase required: " + progress.purchaseRequired,
+    "Unknown: " + progress.unknown,
+    "Four-character collectible-only candidates skipped: " + progress.collectibleOnly,
+    "",
+    "Checks run sequentially. Telegram rate limits are respected."
+  ].join("\n");
+}
+
+function formatStatus(status: string): string {
+  const labels: Record<string, string> = {
+    AVAILABLE: "FREE — Telegram confirmed available at check time",
+    OCCUPIED: "OCCUPIED",
+    PURCHASE_REQUIRED: "NOT FREE — Telegram says it can be purchased on Fragment",
+    COLLECTIBLE_ONLY: "COLLECTIBLE ONLY — not a free Basic username",
+    INVALID: "INVALID",
+    UNKNOWN: "UNKNOWN — not treated as available"
+  };
+  return labels[status] ?? status;
+}
+
+export function createBot(checker: TelegramUsernameChecker): Bot {
+  const bot = new Bot(requireBotToken());
+  let activeSearch = false;
+
+  bot.command("start", async (ctx) => {
+    await ctx.reply(
+      [
+        "UserFind — quality-first Telegram username discovery.",
+        "",
+        "I rank meaningful words and brandable names first, then verify them with Telegram.",
+        "Only Telegram-confirmed free Basic usernames are reported as available.",
+        "",
+        "Commands:",
+        "/find — deep search (default lengths 5–8)",
+        "/find 5-7 15 — choose length range and result count",
+        "/check username — check one name",
+        "/id — show your Telegram numeric ID",
+        "/help — help",
+        "",
+        "Four-character names are collectible-only and are not free to claim."
+      ].join("\n")
+    );
+  });
+
+  bot.command("id", async (ctx) => {
+    await ctx.reply("Your Telegram user ID: " + String(ctx.from?.id ?? "unknown"));
+  });
+
+  bot.command("help", async (ctx) => {
+    await ctx.reply(
+      [
+        "UserFind commands",
+        "",
+        "/find — search lengths 5–8",
+        "/find 5-7 20 — search lengths 5–7 and return up to 20 matches",
+        "/check @username — check one username",
+        "/id — show your numeric Telegram ID",
+        "",
+        "A name is shown as FREE only if Telegram's account.checkUsername returns true.",
+        "Purchase-required, occupied, invalid and unknown names are never shown as free.",
+        "A successful check does not reserve the username; claim it immediately in Telegram."
+      ].join("\n")
+    );
+  });
+
+  bot.command("check", async (ctx) => {
+    if (!isOwner(ctx)) {
+      await ctx.reply("Search access is private. Add your numeric Telegram ID to BOT_ALLOWED_USER_IDS in .env.");
+      return;
+    }
+
+    const username = String(ctx.match ?? "").trim();
+    if (!username) {
+      await ctx.reply("Usage: /check username");
+      return;
+    }
+
+    try {
+      const result = await checker.check(username);
+      await ctx.reply(
+        "@" + result.username + "\n" +
+        formatStatus(result.status) + "\n" +
+        result.detail + "\n" +
+        "Checked: " + result.checkedAt
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await ctx.reply("Check stopped: " + message);
+    }
+  });
+
+  bot.command("find", async (ctx) => {
+    if (!isOwner(ctx)) {
+      await ctx.reply("Search access is private. Add your numeric Telegram ID to BOT_ALLOWED_USER_IDS in .env.");
+      return;
+    }
+
+    if (activeSearch) {
+      await ctx.reply("A deep search is already running. Wait for it to finish before starting another.");
+      return;
+    }
+
+    let args: ReturnType<typeof parseFindArguments>;
+    try {
+      args = parseFindArguments(String(ctx.match ?? ""));
+    } catch (error) {
+      await ctx.reply(error instanceof Error ? error.message : "Invalid search arguments.");
+      return;
+    }
+
+    activeSearch = true;
+    const chatId = ctx.chat.id;
+    const statusMessage = await ctx.reply(
+      "Preparing candidates…\nRange: " + args.minLength + "–" + args.maxLength + "\nTime budget: up to 10 minutes."
+    );
+
+    let lastEditAt = Date.now();
+
+    try {
+      const summary = await runDeepSearch(
+        checker,
+        {
+          minLength: args.minLength,
+          maxLength: args.maxLength,
+          resultLimit: args.resultLimit,
+          maxCandidates: config.maxCandidates,
+          durationMs: config.searchDurationMs,
+          intervalMs: config.checkIntervalMs
+        },
+        async (progress) => {
+          if (Date.now() - lastEditAt < 25_000) return;
+          await ctx.api.editMessageText(chatId, statusMessage.message_id, progressText(progress));
+          lastEditAt = Date.now();
+        }
+      );
+
+      await appendSearchHistory(summary);
+
+      const lines = [
+        "UserFind Deep Hunt finished",
+        "",
+        "Checked: " + summary.checked,
+        "Confirmed free: " + summary.available,
+        "Occupied: " + summary.occupied,
+        "Fragment purchase required (not free): " + summary.purchaseRequired,
+        "Unknown: " + summary.unknown,
+        "Four-character collectible-only skipped: " + summary.collectibleOnly,
+        "Generated candidates: " + summary.candidatesGenerated,
+        "Elapsed: " + Math.round(summary.elapsedMs / 1000) + " seconds"
+      ];
+
+      if (summary.stopReason === "telegram_flood_wait") {
+        lines.push("Stopped because Telegram requested FLOOD_WAIT (" + summary.floodWaitSeconds + " seconds). No limit bypass was attempted.");
+      } else if (summary.stopReason === "time_budget_reached") {
+        lines.push("Stopped at the configured time budget.");
+      }
+
+      if (summary.results.length) {
+        lines.push("", "Best Telegram-confirmed free results:");
+        summary.results.forEach((result, index) => {
+          lines.push(
+            "",
+            String(index + 1) + ". @" + result.username + " — quality " + result.score.total + "/100",
+            "Source: " + result.source + " | checked " + result.checkedAt,
+            "https://t.me/" + result.username
+          );
+        });
+        lines.push("", "These checks do not reserve the names. Open Telegram and claim a result immediately; availability can change.");
+      } else {
+        lines.push("", "No free username was confirmed in this run. Unknown and purchase-required names were not counted as free.");
+      }
+
+      if (args.minLength === 4) {
+        lines.push("", "Four-character names were skipped for free-claim search because Telegram classifies them as collectible-only.");
+      }
+
+      await ctx.api.editMessageText(chatId, statusMessage.message_id, lines.join("\n"));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await ctx.api.editMessageText(chatId, statusMessage.message_id, "Search failed: " + message);
+    } finally {
+      activeSearch = false;
+    }
+  });
+
+  bot.catch((error) => {
+    console.error("Bot update error:", error.error);
+  });
+
+  return bot;
+}
+
+export async function startBot(bot: Bot): Promise<void> {
+  await bot.api.setMyCommands([
+    { command: "start", description: "Start UserFind" },
+    { command: "find", description: "Find free usernames" },
+    { command: "check", description: "Check one username" },
+    { command: "id", description: "Show your Telegram numeric ID" },
+    { command: "help", description: "Show help" }
+  ]);
+
+  await bot.start({
+    onStart: (botInfo) => console.log("UserFind bot started as @" + botInfo.username)
+  });
+}
