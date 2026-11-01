@@ -5,7 +5,7 @@ export type UsernameStatus =
   | "AVAILABLE"
   | "OCCUPIED"
   | "PURCHASE_REQUIRED"
-  | "COLLECTIBLE_ONLY"
+  | "NOT_BASIC_LENGTH"
   | "INVALID"
   | "UNKNOWN";
 
@@ -23,7 +23,14 @@ export class TelegramFloodWaitError extends Error {
   constructor(waitSeconds: number) {
     super("Telegram requested a FLOOD_WAIT of " + waitSeconds + " seconds.");
     this.name = "TelegramFloodWaitError";
-    this.waitSeconds = waitSeconds;
+    this.waitSeconds = Math.max(1, Math.ceil(waitSeconds));
+  }
+}
+
+export class TelegramCheckError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TelegramCheckError";
   }
 }
 
@@ -51,33 +58,94 @@ function getErrorText(error: unknown): string {
   return String(error);
 }
 
-export class TelegramUsernameChecker {
-  constructor(private readonly client: TelegramClient) {}
+function getFloodWaitSeconds(error: unknown, message: string): number {
+  if (error && typeof error === "object") {
+    const seconds = (error as { seconds?: unknown }).seconds;
+    if (typeof seconds === "number" && Number.isFinite(seconds)) {
+      return Math.max(1, Math.ceil(seconds));
+    }
+  }
 
-  async check(input: string): Promise<UsernameCheckResult> {
+  const match = message.match(/FLOOD_WAIT_([0-9]+)/i)
+    ?? message.match(/wait of ([0-9]+) seconds/i);
+  return match ? Math.max(1, Number(match[1])) : 60;
+}
+
+function createLocalResult(
+  username: string,
+  status: "INVALID" | "NOT_BASIC_LENGTH",
+  detail: string
+): UsernameCheckResult {
+  return {
+    username,
+    status,
+    claimable: false,
+    checkedAt: new Date().toISOString(),
+    detail
+  };
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/**
+ * Serializes all MTProto username checks and applies one shared request interval.
+ * Deep search, manual /check and the release monitor all use this same queue.
+ */
+export class TelegramUsernameChecker {
+  private queue: Promise<void> = Promise.resolve();
+  private nextRequestAt = 0;
+  private blockedUntil = 0;
+
+  constructor(
+    private readonly client: TelegramClient,
+    private readonly minimumIntervalMs = 1_500
+  ) {}
+
+  check(input: string): Promise<UsernameCheckResult> {
     const username = normalizeUsername(input);
-    const checkedAt = new Date().toISOString();
 
     if (!/^[a-z][a-z0-9_]{3,31}$/.test(username)) {
-      return {
+      return Promise.resolve(createLocalResult(
         username,
-        status: "INVALID",
-        claimable: false,
-        checkedAt,
-        detail: "Telegram Basic usernames must start with a letter and contain 5–32 letters, digits or underscores."
-      };
+        "INVALID",
+        "Telegram Basic usernames must start with a letter and contain 5–32 letters, digits or underscores."
+      ));
     }
 
-    // Basic usernames are 5–32 characters. Four-character names are collectible-only.
+    // account.checkUsername only accepts 5–32 characters. Four-character names
+    // cannot be confirmed as free Basic usernames through this method.
     if (username.length === 4) {
-      return {
+      return Promise.resolve(createLocalResult(
         username,
-        status: "COLLECTIBLE_ONLY",
-        claimable: false,
-        checkedAt,
-        detail: "Four-character Telegram usernames are collectible-only and cannot be claimed as free Basic usernames."
-      };
+        "NOT_BASIC_LENGTH",
+        "Four characters are below Telegram's 5-character Basic username minimum. This result does not verify a Fragment collectible listing."
+      ));
     }
+
+    const operation = this.queue.then(() => this.checkOnTelegram(username));
+    this.queue = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  private async checkOnTelegram(username: string): Promise<UsernameCheckResult> {
+    const now = Date.now();
+
+    if (now < this.blockedUntil) {
+      throw new TelegramFloodWaitError(Math.ceil((this.blockedUntil - now) / 1_000));
+    }
+
+    const waitMs = this.nextRequestAt - now;
+    if (waitMs > 0) await delay(waitMs);
+
+    const beforeRequest = Date.now();
+    if (beforeRequest < this.blockedUntil) {
+      throw new TelegramFloodWaitError(Math.ceil((this.blockedUntil - beforeRequest) / 1_000));
+    }
+
+    this.nextRequestAt = Date.now() + Math.max(0, this.minimumIntervalMs);
+    const checkedAt = new Date().toISOString();
 
     try {
       const available = await this.client.invoke(
@@ -90,7 +158,7 @@ export class TelegramUsernameChecker {
           status: "AVAILABLE",
           claimable: true,
           checkedAt,
-          detail: "Telegram confirmed this Basic username is available at the time of this check."
+          detail: "Telegram confirmed this Basic username is available at the time of this check. It is not reserved."
         };
       }
 
@@ -100,44 +168,68 @@ export class TelegramUsernameChecker {
           status: "OCCUPIED",
           claimable: false,
           checkedAt,
-          detail: "Telegram returned false for account.checkUsername."
+          detail: "Telegram returned false for account.checkUsername; it is not available as a free Basic username."
         };
       }
 
-      return {
-        username,
-        status: "UNKNOWN",
-        claimable: false,
-        checkedAt,
-        detail: "Telegram returned an unrecognized response. This is not treated as available."
-      };
+      throw new TelegramCheckError(
+        "Telegram returned a non-boolean result for account.checkUsername. The username is not treated as available."
+      );
     } catch (error) {
+      if (error instanceof TelegramFloodWaitError || error instanceof TelegramCheckError) {
+        throw error;
+      }
+
       if (error instanceof FloodWaitError) {
-        throw new TelegramFloodWaitError(error.seconds);
+        const waitSeconds = getFloodWaitSeconds(error, getErrorText(error));
+        this.blockedUntil = Date.now() + waitSeconds * 1_000;
+        throw new TelegramFloodWaitError(waitSeconds);
       }
 
       const message = getErrorText(error);
       const classification = classifyTelegramError(message);
 
       if (classification === "FLOOD_WAIT") {
-        throw new TelegramFloodWaitError(60);
+        const waitSeconds = getFloodWaitSeconds(error, message);
+        this.blockedUntil = Date.now() + waitSeconds * 1_000;
+        throw new TelegramFloodWaitError(waitSeconds);
       }
 
-      const detailByStatus: Record<Exclude<UsernameStatus, "AVAILABLE" | "COLLECTIBLE_ONLY">, string> = {
-        OCCUPIED: "Telegram reports that this username is already occupied.",
-        PURCHASE_REQUIRED: "Telegram reports that this username can be purchased on Fragment. It is not free to claim.",
-        INVALID: "Telegram rejected this username as invalid.",
-        UNKNOWN: "Telegram did not provide a recognized availability result: " + message.slice(0, 180)
-      };
+      if (classification === "OCCUPIED") {
+        return {
+          username,
+          status: "OCCUPIED",
+          claimable: false,
+          checkedAt,
+          detail: "Telegram reports that this username is already occupied."
+        };
+      }
 
-      const status = classification;
-      return {
-        username,
-        status,
-        claimable: false,
-        checkedAt,
-        detail: detailByStatus[status as keyof typeof detailByStatus]
-      };
+      if (classification === "PURCHASE_REQUIRED") {
+        return {
+          username,
+          status: "PURCHASE_REQUIRED",
+          claimable: false,
+          checkedAt,
+          detail: "Telegram reports that this username can be purchased through Fragment. It is not free; this is not a market price or listing check."
+        };
+      }
+
+      if (classification === "INVALID") {
+        return {
+          username,
+          status: "INVALID",
+          claimable: false,
+          checkedAt,
+          detail: "Telegram rejected this username as invalid."
+        };
+      }
+
+      // Network, authorization, server and unrecognized RPC errors must stop a
+      // scan. Counting them as ordinary occupied/unknown results hides failures.
+      throw new TelegramCheckError(
+        "Telegram availability check failed for @" + username + ": " + message.slice(0, 240)
+      );
     }
   }
 }

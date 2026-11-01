@@ -2,25 +2,27 @@ import { TelegramUsernameChecker } from "./telegram/checker.js";
 import { createAuthorizedTelegramClient } from "./telegram/client.js";
 import { createBot, startBot } from "./bot.js";
 import { startReleaseMonitor } from "./monitor/release-monitor.js";
+import { config, requireBotToken } from "./config.js";
 
 async function main(): Promise<void> {
+  // Validate the Bot API credential before opening an MTProto account session.
+  requireBotToken();
+
   const client = await createAuthorizedTelegramClient();
-  const checker = new TelegramUsernameChecker(client);
-  const bot = createBot(checker);
-  const stopReleaseMonitor = startReleaseMonitor(bot, checker);
+  let stopReleaseMonitor: () => void = () => {};
 
-  const shutdown = async (signal: string) => {
-    console.log("Received " + signal + ", shutting down.");
+  try {
+    // The same checker instance shares one serial rate limiter between manual
+    // checks, deep searches and the background release monitor.
+    const checker = new TelegramUsernameChecker(client, config.checkIntervalMs);
+    const bot = createBot(checker);
+    stopReleaseMonitor = startReleaseMonitor(bot, checker);
+
+    await startBot(bot);
+  } finally {
     stopReleaseMonitor();
-    await bot.stop();
     await client.disconnect();
-    process.exit(0);
-  };
-
-  process.once("SIGINT", () => void shutdown("SIGINT"));
-  process.once("SIGTERM", () => void shutdown("SIGTERM"));
-
-  await startBot(bot);
+  }
 }
 
 main().catch((error: unknown) => {

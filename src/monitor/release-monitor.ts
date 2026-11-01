@@ -6,13 +6,10 @@ import {
   removeWatchedUsername
 } from "../storage/watch-store.js";
 import {
+  TelegramCheckError,
   TelegramFloodWaitError,
   TelegramUsernameChecker
 } from "../telegram/checker.js";
-
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
 
 export function startReleaseMonitor(
   bot: Bot,
@@ -25,14 +22,17 @@ export function startReleaseMonitor(
   }
 
   let running = false;
+  let stopped = false;
 
   const runCycle = async (): Promise<void> => {
-    if (running) return;
+    if (running || stopped) return;
     running = true;
 
     try {
       const entries = await readWatchlist();
       for (const entry of entries) {
+        if (stopped) break;
+
         try {
           const result = await checker.check(entry.username);
           await markWatchedChecked(entry.username);
@@ -64,20 +64,19 @@ export function startReleaseMonitor(
           } else if (
             result.status === "PURCHASE_REQUIRED" ||
             result.status === "INVALID" ||
-            result.status === "COLLECTIBLE_ONLY"
+            result.status === "NOT_BASIC_LENGTH"
           ) {
-            // It cannot be claimed as a free Basic username.
             await removeWatchedUsername(entry.username);
           }
         } catch (error) {
-          if (error instanceof TelegramFloodWaitError) {
-            console.warn("Release monitor paused by Telegram FLOOD_WAIT:", error.waitSeconds);
+          console.error("Release monitor stopped for this cycle:", error);
+          if (error instanceof TelegramFloodWaitError || error instanceof TelegramCheckError) {
             break;
           }
-          console.error("Release monitor check failed for @" + entry.username + ":", error);
+          // A transient transport/runtime error is also a reason to stop the
+          // cycle rather than issue many repeated failing requests.
+          break;
         }
-
-        await sleep(config.checkIntervalMs);
       }
     } catch (error) {
       console.error("Release monitor cycle failed:", error);
@@ -92,6 +91,7 @@ export function startReleaseMonitor(
   intervalTimer.unref();
 
   return () => {
+    stopped = true;
     clearTimeout(initialTimer);
     clearInterval(intervalTimer);
   };

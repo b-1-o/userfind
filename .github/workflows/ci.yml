@@ -16,19 +16,24 @@ jobs:
           node-version: 22
       - run: npm install
       - run: npm run typecheck
+      - run: npm run build
       - run: npm test
-      - name: Report dependency advisories
+      - name: Audit production and development dependencies
         run: |
           npm audit --json > /tmp/userfind-audit.json || true
           node --input-type=commonjs -e '
             const fs = require("node:fs");
             const audit = JSON.parse(fs.readFileSync("/tmp/userfind-audit.json", "utf8"));
-            console.log("Audit summary:", JSON.stringify(audit.metadata?.vulnerabilities ?? {}));
+            const summary = audit.metadata?.vulnerabilities ?? {};
+            console.log("Audit summary:", JSON.stringify(summary));
             for (const [name, item] of Object.entries(audit.vulnerabilities ?? {})) {
               console.log("\n" + name + " — " + item.severity + (item.isDirect ? " (direct)" : " (transitive)"));
               for (const via of item.via ?? []) {
                 if (typeof via === "object") console.log("  " + via.title + " | range: " + via.range + " | url: " + via.url);
               }
-              console.log("  fixAvailable: " + JSON.stringify(item.fixAvailable));
+            }
+            if ((summary.total ?? 0) > 0) {
+              console.error("Dependency audit found vulnerable packages.");
+              process.exit(1);
             }
           '

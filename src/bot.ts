@@ -11,7 +11,10 @@ import { TelegramUsernameChecker } from "./telegram/checker.js";
 
 function isOwner(ctx: Context): boolean {
   const userId = ctx.from?.id;
-  return typeof userId === "number" && config.allowedUserIds.has(userId);
+  // Never send private scan results into a group, even when the owner sends the command there.
+  return ctx.chat?.type === "private"
+    && typeof userId === "number"
+    && config.allowedUserIds.has(userId);
 }
 
 function parseFindArguments(raw: string): { minLength: number; maxLength: number; resultLimit: number } {
@@ -29,15 +32,50 @@ function parseFindArguments(raw: string): { minLength: number; maxLength: number
   const maxLength = Number(match[2]);
   const requestedLimit = match[3] ? Number(match[3]) : config.maxResults;
 
-  if (minLength < 4 || maxLength > 32 || minLength > maxLength) {
-    throw new Error("Length range must be between 4 and 32, with minimum not greater than maximum.");
+  if (minLength < 4 || maxLength > 32 || minLength > maxLength || maxLength < 5) {
+    throw new Error("Free Basic Telegram usernames must be 5–32 characters. Use /find 5-8; four-character names cannot be checked as free Basic usernames.");
+  }
+  if (requestedLimit < 1 || requestedLimit > 50) {
+    throw new Error("Result limit must be between 1 and 50.");
   }
 
-  return {
-    minLength,
-    maxLength,
-    resultLimit: Math.min(50, Math.max(1, requestedLimit))
-  };
+  return { minLength, maxLength, resultLimit: requestedLimit };
+}
+
+export function splitTelegramText(text: string, maxLength = 3_500): string[] {
+  const chunks: string[] = [];
+  let current = "";
+
+  for (const originalLine of text.split("\n")) {
+    let line = originalLine;
+    while (line.length > maxLength) {
+      if (current) {
+        chunks.push(current);
+        current = "";
+      }
+      chunks.push(line.slice(0, maxLength));
+      line = line.slice(maxLength);
+    }
+
+    const next = current ? current + "\n" + line : line;
+    if (next.length > maxLength) {
+      if (current) chunks.push(current);
+      current = line;
+    } else {
+      current = next;
+    }
+  }
+
+  if (current) chunks.push(current);
+  return chunks.length ? chunks : [""];
+}
+
+async function replyLongText(ctx: Context, text: string): Promise<void> {
+  const chunks = splitTelegramText(text);
+  await ctx.reply(chunks[0]!);
+  for (const chunk of chunks.slice(1)) {
+    await ctx.api.sendMessage(ctx.chat!.id, chunk);
+  }
 }
 
 function progressText(progress: SearchProgress): string {
@@ -47,19 +85,19 @@ function progressText(progress: SearchProgress): string {
     "Free and confirmed: " + progress.available,
     "Occupied: " + progress.occupied,
     "Fragment purchase required: " + progress.purchaseRequired,
-    "Unknown: " + progress.unknown,
-    "Four-character collectible-only candidates skipped: " + progress.collectibleOnly,
+    "Unknown/errors: " + progress.unknown,
+    "Four-character names outside Basic rules: " + progress.notBasicLength,
     "",
-    "Checks run sequentially. Telegram rate limits are respected."
+    "All MTProto checks share one sequential rate limiter."
   ].join("\n");
 }
 
 function formatStatus(status: string): string {
   const labels: Record<string, string> = {
-    AVAILABLE: "FREE — Telegram confirmed available at check time",
+    AVAILABLE: "FREE BASIC — Telegram confirmed available at check time",
     OCCUPIED: "OCCUPIED",
-    PURCHASE_REQUIRED: "NOT FREE — Telegram says it can be purchased on Fragment",
-    COLLECTIBLE_ONLY: "COLLECTIBLE ONLY — not a free Basic username",
+    PURCHASE_REQUIRED: "NOT FREE — Telegram says it can be purchased through Fragment",
+    NOT_BASIC_LENGTH: "NOT A FREE BASIC USERNAME — four characters are below the 5-character minimum",
     INVALID: "INVALID",
     UNKNOWN: "UNKNOWN — not treated as available"
   };
@@ -68,7 +106,7 @@ function formatStatus(status: string): string {
 
 export function createBot(checker: TelegramUsernameChecker): Bot {
   const bot = new Bot(requireBotToken());
-  let activeSearch = false;
+  let activeSearchController: AbortController | null = null;
 
   bot.command("start", async (ctx) => {
     await ctx.reply(
@@ -82,12 +120,13 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
         "/find — deep search (default lengths 5–8)",
         "/find 5-7 15 — choose length range and result count",
         "/check username — check one name",
+        "/cancel — stop the active search",
         "/watchlist — names monitored for future release",
         "/unwatch username — stop monitoring a name",
         "/id — show your Telegram numeric ID",
         "/help — help",
         "",
-        "Four-character names are collectible-only and are not free to claim."
+        "Four-character names are not eligible for free Basic usernames; their Fragment status is not checked here."
       ].join("\n")
     );
   });
@@ -104,13 +143,14 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
         "/find — search lengths 5–8",
         "/find 5-7 20 — search lengths 5–7 and return up to 20 matches",
         "/check @username — check one username",
+        "/cancel — cancel the active deep search",
         "/watchlist — see occupied names monitored for release",
         "/unwatch username — remove a name from monitoring",
         "/id — show your numeric Telegram user ID",
         "",
         "A name is shown as FREE only if Telegram's account.checkUsername returns true.",
+        "USERNAME_PURCHASE_AVAILABLE is never counted as free.",
         "Occupied high-quality candidates are monitored and rechecked every few hours.",
-        "Inactivity is not treated as proof of availability.",
         "A successful check does not reserve the username; claim it immediately in Telegram."
       ].join("\n")
     );
@@ -118,7 +158,7 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
 
   bot.command("watchlist", async (ctx) => {
     if (!isOwner(ctx)) {
-      await ctx.reply("Search access is private. Add your numeric Telegram ID to BOT_ALLOWED_USER_IDS in .env.");
+      await ctx.reply("This command is available only in the bot's private chat for the configured owner.");
       return;
     }
 
@@ -130,7 +170,7 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
 
     const lines = [
       "Release watchlist",
-      "These names are currently occupied. UserFind rechecks them periodically; it does not infer inactivity."
+      "These names were confirmed occupied. UserFind rechecks them periodically; it does not infer inactivity."
     ];
     entries.slice(0, 40).forEach((entry, index) => {
       lines.push(
@@ -141,12 +181,12 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
     });
     if (entries.length > 40) lines.push("", "Showing 40 of " + entries.length + " tracked names.");
     lines.push("", "Use /unwatch username to remove one.");
-    await ctx.reply(lines.join("\n"));
+    await replyLongText(ctx, lines.join("\n"));
   });
 
   bot.command("unwatch", async (ctx) => {
     if (!isOwner(ctx)) {
-      await ctx.reply("Search access is private. Add your numeric Telegram ID to BOT_ALLOWED_USER_IDS in .env.");
+      await ctx.reply("This command is available only in the bot's private chat for the configured owner.");
       return;
     }
 
@@ -162,7 +202,7 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
 
   bot.command("check", async (ctx) => {
     if (!isOwner(ctx)) {
-      await ctx.reply("Search access is private. Add your numeric Telegram ID to BOT_ALLOWED_USER_IDS in .env.");
+      await ctx.reply("This command is available only in the bot's private chat for the configured owner.");
       return;
     }
 
@@ -186,14 +226,29 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
     }
   });
 
-  bot.command("find", async (ctx) => {
+  bot.command("cancel", async (ctx) => {
     if (!isOwner(ctx)) {
-      await ctx.reply("Search access is private. Add your numeric Telegram ID to BOT_ALLOWED_USER_IDS in .env.");
+      await ctx.reply("This command is available only in the bot's private chat for the configured owner.");
       return;
     }
 
-    if (activeSearch) {
-      await ctx.reply("A deep search is already running. Wait for it to finish before starting another.");
+    if (!activeSearchController) {
+      await ctx.reply("There is no active search to cancel.");
+      return;
+    }
+
+    activeSearchController.abort();
+    await ctx.reply("Cancellation requested. The current Telegram request will finish safely; no further usernames will be checked.");
+  });
+
+  bot.command("find", async (ctx) => {
+    if (!isOwner(ctx)) {
+      await ctx.reply("This command is available only in the bot's private chat for the configured owner.");
+      return;
+    }
+
+    if (activeSearchController) {
+      await ctx.reply("A deep search is already running. Use /cancel before starting another.");
       return;
     }
 
@@ -205,15 +260,17 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
       return;
     }
 
-    activeSearch = true;
-    const chatId = ctx.chat.id;
-    const statusMessage = await ctx.reply(
-      "Preparing candidates…\nRange: " + args.minLength + "–" + args.maxLength + "\nTime budget: up to 10 minutes."
-    );
-
+    const controller = new AbortController();
+    activeSearchController = controller;
+    const chatId = ctx.chat!.id;
+    let statusMessage: { message_id: number } | undefined;
     let lastEditAt = Date.now();
 
     try {
+      statusMessage = await ctx.reply(
+        "Preparing candidates…\nRange: " + args.minLength + "–" + args.maxLength + "\nTime budget: up to 10 minutes."
+      );
+
       const summary = await runDeepSearch(
         checker,
         {
@@ -223,17 +280,30 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
           maxCandidates: config.maxCandidates,
           watchCandidatesLimit: config.watchMaxEntries,
           durationMs: config.searchDurationMs,
-          intervalMs: config.checkIntervalMs
+          signal: controller.signal
         },
         async (progress) => {
-          if (Date.now() - lastEditAt < 25_000) return;
+          if (Date.now() - lastEditAt < 25_000 || !statusMessage) return;
           await ctx.api.editMessageText(chatId, statusMessage.message_id, progressText(progress));
           lastEditAt = Date.now();
         }
       );
 
-      await appendSearchHistory(summary);
-      const watchedCount = await mergeWatchedCandidates(summary.occupiedCandidates, config.watchMaxEntries);
+      const storageWarnings: string[] = [];
+      try {
+        await appendSearchHistory(summary);
+      } catch (error) {
+        console.error("Could not save search history:", error);
+        storageWarnings.push("Search history could not be saved.");
+      }
+
+      let watchedCount = 0;
+      try {
+        watchedCount = await mergeWatchedCandidates(summary.occupiedCandidates, config.watchMaxEntries);
+      } catch (error) {
+        console.error("Could not update release watchlist:", error);
+        storageWarnings.push("Release watchlist could not be updated.");
+      }
 
       const lines = [
         "UserFind Deep Hunt finished",
@@ -242,8 +312,8 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
         "Confirmed free: " + summary.available,
         "Occupied: " + summary.occupied,
         "Fragment purchase required (not free): " + summary.purchaseRequired,
-        "Unknown: " + summary.unknown,
-        "Four-character collectible-only skipped: " + summary.collectibleOnly,
+        "Unknown/errors: " + summary.unknown,
+        "Four-character names outside Basic rules: " + summary.notBasicLength,
         "Generated candidates: " + summary.candidatesGenerated,
         "Names kept under release monitoring: " + watchedCount,
         "Recheck interval: " + Math.round(config.watchIntervalMs / 3_600_000) + " hours",
@@ -251,9 +321,17 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
       ];
 
       if (summary.stopReason === "telegram_flood_wait") {
-        lines.push("Stopped because Telegram requested FLOOD_WAIT (" + summary.floodWaitSeconds + " seconds). No limit bypass was attempted.");
+        lines.push("Stopped because Telegram requested FLOOD_WAIT (" + summary.floodWaitSeconds + " seconds). All further checks are paused; no limit bypass was attempted.");
+      } else if (summary.stopReason === "telegram_error") {
+        lines.push("Stopped because the Telegram check failed: " + (summary.errorMessage ?? "unknown API error"));
       } else if (summary.stopReason === "time_budget_reached") {
         lines.push("Stopped at the configured time budget.");
+      } else if (summary.stopReason === "cancelled") {
+        lines.push("Search cancelled by the owner. The in-flight request, if any, was allowed to finish.");
+      }
+
+      if (storageWarnings.length) {
+        lines.push("", ...storageWarnings);
       }
 
       if (summary.results.length) {
@@ -272,15 +350,36 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
       }
 
       if (args.minLength === 4) {
-        lines.push("", "Four-character names were skipped for free-claim search because Telegram classifies them as collectible-only.");
+        lines.push("", "Four-character candidates were excluded from free results: Telegram's Basic username checker requires at least five characters. This bot does not verify their Fragment NFT listings.");
       }
 
-      await ctx.api.editMessageText(chatId, statusMessage.message_id, lines.join("\n"));
+      const chunks = splitTelegramText(lines.join("\n"));
+      if (!statusMessage) {
+        await ctx.api.sendMessage(chatId, chunks[0]!);
+      } else {
+        try {
+          await ctx.api.editMessageText(chatId, statusMessage.message_id, chunks[0]!);
+        } catch (editError) {
+          console.error("Could not edit search status message; sending a new message:", editError);
+          await ctx.api.sendMessage(chatId, chunks[0]!);
+        }
+      }
+      for (const chunk of chunks.slice(1)) {
+        await ctx.api.sendMessage(chatId, chunk);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await ctx.api.editMessageText(chatId, statusMessage.message_id, "Search failed: " + message);
+      try {
+        if (statusMessage) {
+          await ctx.api.editMessageText(chatId, statusMessage.message_id, "Search failed: " + message);
+        } else {
+          await ctx.api.sendMessage(chatId, "Search failed: " + message);
+        }
+      } catch (deliveryError) {
+        console.error("Could not send search error to owner:", deliveryError);
+      }
     } finally {
-      activeSearch = false;
+      if (activeSearchController === controller) activeSearchController = null;
     }
   });
 
@@ -296,6 +395,7 @@ export async function startBot(bot: Bot): Promise<void> {
     { command: "start", description: "Start UserFind" },
     { command: "find", description: "Find free usernames" },
     { command: "check", description: "Check one username" },
+    { command: "cancel", description: "Cancel the active search" },
     { command: "watchlist", description: "Show watched occupied usernames" },
     { command: "unwatch", description: "Remove a username from monitoring" },
     { command: "id", description: "Show your numeric Telegram ID" },

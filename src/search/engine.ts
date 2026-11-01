@@ -1,5 +1,9 @@
 import { Candidate, generateCandidates } from "../generator/candidates.js";
-import { TelegramFloodWaitError, TelegramUsernameChecker } from "../telegram/checker.js";
+import {
+  TelegramCheckError,
+  TelegramFloodWaitError,
+  TelegramUsernameChecker
+} from "../telegram/checker.js";
 
 export interface SearchOptions {
   minLength: number;
@@ -8,7 +12,7 @@ export interface SearchOptions {
   maxCandidates: number;
   watchCandidatesLimit: number;
   durationMs: number;
-  intervalMs: number;
+  signal?: AbortSignal;
 }
 
 export interface AvailableCandidate extends Candidate {
@@ -21,7 +25,7 @@ export interface SearchProgress {
   occupied: number;
   purchaseRequired: number;
   unknown: number;
-  collectibleOnly: number;
+  notBasicLength: number;
 }
 
 export interface SearchSummary extends SearchProgress {
@@ -30,13 +34,10 @@ export interface SearchSummary extends SearchProgress {
   startedAt: string;
   finishedAt: string;
   elapsedMs: number;
-  stopReason: "time_budget_reached" | "candidate_pool_exhausted" | "telegram_flood_wait";
+  stopReason: "time_budget_reached" | "candidate_pool_exhausted" | "telegram_flood_wait" | "telegram_error" | "cancelled";
   floodWaitSeconds?: number;
+  errorMessage?: string;
   candidatesGenerated: number;
-}
-
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 export async function runDeepSearch(
@@ -60,24 +61,31 @@ export async function runDeepSearch(
     occupied: 0,
     purchaseRequired: 0,
     unknown: 0,
-    collectibleOnly: 0
+    notBasicLength: 0
   };
 
   const results: AvailableCandidate[] = [];
   const occupiedCandidates: Candidate[] = [];
   let stopReason: SearchSummary["stopReason"] = "candidate_pool_exhausted";
   let floodWaitSeconds: number | undefined;
+  let errorMessage: string | undefined;
   let lastProgressAt = Date.now();
 
   for (const candidate of candidates) {
+    if (options.signal?.aborted) {
+      stopReason = "cancelled";
+      break;
+    }
+
     if (Date.now() >= deadline) {
       stopReason = "time_budget_reached";
       break;
     }
 
-    // Four-character Telegram handles are collectible-only, not free Basic usernames.
-    if (candidate.username.length === 4) {
-      progress.collectibleOnly += 1;
+    // Do not send four-character candidates to Telegram: the Basic API
+    // requires at least five characters and this bot does not query Fragment.
+    if (candidate.username.length < 5) {
+      progress.notBasicLength += 1;
       continue;
     }
 
@@ -93,8 +101,10 @@ export async function runDeepSearch(
         occupiedCandidates.push(candidate);
       } else if (check.status === "PURCHASE_REQUIRED") {
         progress.purchaseRequired += 1;
-      } else if (check.status === "COLLECTIBLE_ONLY") {
-        progress.collectibleOnly += 1;
+      } else if (check.status === "NOT_BASIC_LENGTH") {
+        progress.notBasicLength += 1;
+      } else if (check.status === "INVALID") {
+        progress.unknown += 1;
       } else {
         progress.unknown += 1;
       }
@@ -105,24 +115,26 @@ export async function runDeepSearch(
         break;
       }
 
+      stopReason = "telegram_error";
       progress.checked += 1;
+      errorMessage = error instanceof TelegramCheckError
+        ? error.message
+        : error instanceof Error
+          ? error.message
+          : String(error);
       progress.unknown += 1;
+      break;
     }
 
     if (progress.checked > 0 && (progress.checked % 15 === 0 || Date.now() - lastProgressAt > 25_000)) {
       await onProgress?.({ ...progress });
       lastProgressAt = Date.now();
     }
-
-    if (Date.now() + options.intervalMs >= deadline) {
-      stopReason = "time_budget_reached";
-      break;
-    }
-
-    await sleep(options.intervalMs);
   }
 
-  if (Date.now() >= deadline) {
+  if (options.signal?.aborted && stopReason !== "telegram_flood_wait" && stopReason !== "telegram_error") {
+    stopReason = "cancelled";
+  } else if (Date.now() >= deadline && stopReason === "candidate_pool_exhausted") {
     stopReason = "time_budget_reached";
   }
 
@@ -139,6 +151,7 @@ export async function runDeepSearch(
     elapsedMs: Date.now() - startedClock,
     stopReason,
     floodWaitSeconds,
+    errorMessage,
     candidatesGenerated: candidates.length
   };
 }
