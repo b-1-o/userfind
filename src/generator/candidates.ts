@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { CandidateSource, ScoreBreakdown, scoreCandidate } from "./scoring.js";
 
 export interface Candidate {
@@ -32,11 +33,14 @@ const syllables = [
 ];
 
 async function loadDictionary(): Promise<string[]> {
-  const path = resolve(process.cwd(), "data/words-en.txt");
+  // Resolve relative to this module so both tsx development and the compiled
+  // dist/ build find the dictionary, regardless of the caller's working directory.
+  const path = resolve(dirname(fileURLToPath(import.meta.url)), "../../data/words-en.txt");
   try {
     const raw = await readFile(path, "utf8");
     return raw.split(/\r?\n/).map((line) => line.trim().toLowerCase()).filter(Boolean);
-  } catch {
+  } catch (error) {
+    console.error("Could not load the username dictionary at " + path + ":", error);
     return [];
   }
 }

@@ -17,6 +17,11 @@ jobs:
       - run: npm install
       - run: npm run typecheck
       - run: npm run build
+      - name: Verify production artifact excludes tests
+        run: |
+          test -f dist/index.js
+          test -f dist/data/words-en.txt
+          test ! -d dist/tests
       - run: npm test
       - name: Audit production and development dependencies
         run: |

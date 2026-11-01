@@ -68,9 +68,14 @@ The current quality score is a discovery heuristic, not a market-price estimate.
 
    The script prints a TG_SESSION value. Paste it into your local .env only. Never send it to anyone and never commit it.
 
-5. Start the bot:
+5. Start the bot in development mode:
 
    npm run dev
+
+   Or build and start the production version:
+
+   npm run build
+   npm start
 
 6. Send /id to the bot. Copy the numeric ID into BOT_ALLOWED_USER_IDS in .env, restart the bot, then use /find.
 
