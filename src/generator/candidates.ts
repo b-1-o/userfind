@@ -48,7 +48,7 @@ function isCandidate(value: string): boolean {
 export async function generateCandidates(options: CandidateOptions): Promise<Candidate[]> {
   const candidates = new Map<string, Candidate>();
 
-  const add = (raw: string, source: CandidateSource) => {
+  const addExact = (raw: string, source: CandidateSource) => {
     const username = raw.toLowerCase();
     if (!isCandidate(username)) return;
     if (username.length < options.minLength || username.length > options.maxLength) return;
@@ -61,19 +61,30 @@ export async function generateCandidates(options: CandidateOptions): Promise<Can
     });
   };
 
-  const words = await loadDictionary();
+  const add = (raw: string, source: CandidateSource) => {
+    const username = raw.toLowerCase();
+    addExact(username, source);
 
-  for (const word of words) {
-    add(word, "dictionary");
+    if (source === "visual-mutation") return;
 
-    // Try one lowercase l -> i substitution at a time.
-    // Telegram usernames are case-insensitive: uppercase I is not a distinct handle.
-    for (let index = 0; index < word.length; index += 1) {
-      if (word[index] !== "l") continue;
-      const variant = word.slice(0, index) + "i" + word.slice(index + 1);
-      add(variant, "visual-mutation");
+    const positions = [...username]
+      .map((char, index) => char === "l" ? index : -1)
+      .filter((index) => index >= 0);
+
+    // Generate every non-empty combination of lowercase l -> i substitutions.
+    // Uppercase I is not a separate Telegram username because usernames are case-insensitive.
+    const combinations = 1 << Math.min(positions.length, 8);
+    for (let mask = 1; mask < combinations; mask += 1) {
+      const chars = [...username];
+      positions.forEach((position, bit) => {
+        if (bit < 8 && (mask & (1 << bit)) !== 0) chars[position] = "i";
+      });
+      addExact(chars.join(""), "visual-mutation");
     }
-  }
+  };
+
+  const words = await loadDictionary();
+  for (const word of words) add(word, "dictionary");
 
   for (const prefix of prefixes) {
     for (const suffix of suffixes) {
