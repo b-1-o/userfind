@@ -31,7 +31,6 @@ export async function createAuthorizedTelegramClient(): Promise<TelegramClient> 
     );
   }
 
-  client.setLogLevel("warn");
 
   if (!config.allowedUserIds.size) {
     console.warn("BOT_ALLOWED_USER_IDS is empty. Search/check commands will be locked until an owner ID is configured.");
