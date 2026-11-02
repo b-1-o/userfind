@@ -22,6 +22,27 @@ describe("runDeepSearch", () => {
     expect(summary.errorMessage).toContain("AUTH_KEY_UNREGISTERED");
     expect(check).toHaveBeenCalledTimes(1);
     expect(summary.unknown).toBe(1);
+    expect(summary.invalid).toBe(0);
+  });
+
+  it("counts Telegram-invalid usernames separately from unknown errors", async () => {
+    const check = vi.fn().mockResolvedValue({
+      username: "apple",
+      status: "INVALID",
+      claimable: false,
+      checkedAt: new Date().toISOString(),
+      detail: "Telegram rejected this username as invalid or reserved."
+    });
+    const checker = { check } as unknown as TelegramUsernameChecker;
+
+    const summary = await runDeepSearch(checker, {
+      ...baseOptions,
+      maxCandidates: 1
+    });
+
+    expect(summary.checked).toBe(1);
+    expect(summary.invalid).toBe(1);
+    expect(summary.unknown).toBe(0);
   });
 
   it("honors an already-aborted search signal", async () => {
