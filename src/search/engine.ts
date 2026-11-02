@@ -25,6 +25,7 @@ export interface SearchProgress {
   available: number;
   occupied: number;
   purchaseRequired: number;
+  invalid: number;
   unknown: number;
   notBasicLength: number;
 }
@@ -62,6 +63,7 @@ export async function runDeepSearch(
     available: 0,
     occupied: 0,
     purchaseRequired: 0,
+    invalid: 0,
     unknown: 0,
     notBasicLength: 0
   };
@@ -105,8 +107,9 @@ export async function runDeepSearch(
         progress.purchaseRequired += 1;
       } else if (check.status === "NOT_BASIC_LENGTH") {
         progress.notBasicLength += 1;
+      } else if (check.status === "INVALID") {
+        progress.invalid += 1;
       } else {
-        // INVALID and other unrecognized responses are never counted as free.
         progress.unknown += 1;
       }
     } catch (error) {

@@ -1,5 +1,7 @@
+import { resolve } from "node:path";
 import { Api, TelegramClient } from "teleproto";
 import { FloodWaitError } from "teleproto/errors";
+import { loadTelegramCooldown, saveTelegramCooldown } from "./cooldown-store.js";
 
 export type UsernameStatus =
   | "AVAILABLE"
@@ -15,6 +17,11 @@ export interface UsernameCheckResult {
   claimable: boolean;
   checkedAt: string;
   detail: string;
+}
+
+export interface TelegramCooldownStatus {
+  blockedUntil: number;
+  waitSeconds: number;
 }
 
 export class TelegramFloodWaitError extends Error {
@@ -86,22 +93,36 @@ function createLocalResult(
 }
 
 function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }
 
 /**
  * Serializes all MTProto username checks and applies one shared request interval.
  * Deep search, manual /check and the release monitor all use this same queue.
+ * Telegram FLOOD_WAIT is persisted so restarting the bot cannot accidentally
+ * turn the server's cooldown into another immediate request.
  */
 export class TelegramUsernameChecker {
   private queue: Promise<void> = Promise.resolve();
   private nextRequestAt = 0;
   private blockedUntil = 0;
+  private readonly cooldownLoaded: Promise<void>;
 
   constructor(
     private readonly client: TelegramClient,
-    private readonly minimumIntervalMs = 1_500
-  ) {}
+    private readonly minimumIntervalMs = 1_500,
+    private readonly cooldownPath = resolve(process.cwd(), "data/telegram-cooldown.json")
+  ) {
+    this.cooldownLoaded = loadTelegramCooldown(this.cooldownPath).then((until) => {
+      this.blockedUntil = until;
+    });
+  }
+
+  async getCooldownStatus(): Promise<TelegramCooldownStatus> {
+    await this.cooldownLoaded;
+    const waitSeconds = Math.max(0, Math.ceil((this.blockedUntil - Date.now()) / 1_000));
+    return { blockedUntil: this.blockedUntil, waitSeconds };
+  }
 
   check(input: string): Promise<UsernameCheckResult> {
     const username = normalizeUsername(input);
@@ -120,13 +141,29 @@ export class TelegramUsernameChecker {
       return Promise.resolve(createLocalResult(
         username,
         "NOT_BASIC_LENGTH",
-        "Four characters are below Telegram's 5-character Basic username minimum. This result does not verify a Fragment collectible listing."
+        "Four characters are below Telegram's 5-character Basic username minimum. This result does not verify a collectible or its ownership."
       ));
     }
 
-    const operation = this.queue.then(() => this.checkOnTelegram(username));
+    const operation = this.queue.then(async () => {
+      await this.cooldownLoaded;
+      return this.checkOnTelegram(username);
+    });
     this.queue = operation.then(() => undefined, () => undefined);
     return operation;
+  }
+
+  private async activateFloodWait(waitSeconds: number): Promise<TelegramFloodWaitError> {
+    const until = Math.max(this.blockedUntil, Date.now() + waitSeconds * 1_000);
+    this.blockedUntil = until;
+
+    try {
+      await saveTelegramCooldown(until, this.cooldownPath);
+    } catch (error) {
+      console.error("Could not persist Telegram FLOOD_WAIT:", error);
+    }
+
+    return new TelegramFloodWaitError(Math.ceil((until - Date.now()) / 1_000));
   }
 
   private async checkOnTelegram(username: string): Promise<UsernameCheckResult> {
@@ -182,8 +219,7 @@ export class TelegramUsernameChecker {
 
       if (error instanceof FloodWaitError) {
         const waitSeconds = getFloodWaitSeconds(error, getErrorText(error));
-        this.blockedUntil = Date.now() + waitSeconds * 1_000;
-        throw new TelegramFloodWaitError(waitSeconds);
+        throw await this.activateFloodWait(waitSeconds);
       }
 
       const message = getErrorText(error);
@@ -191,8 +227,7 @@ export class TelegramUsernameChecker {
 
       if (classification === "FLOOD_WAIT") {
         const waitSeconds = getFloodWaitSeconds(error, message);
-        this.blockedUntil = Date.now() + waitSeconds * 1_000;
-        throw new TelegramFloodWaitError(waitSeconds);
+        throw await this.activateFloodWait(waitSeconds);
       }
 
       if (classification === "OCCUPIED") {
@@ -221,12 +256,12 @@ export class TelegramUsernameChecker {
           status: "INVALID",
           claimable: false,
           checkedAt,
-          detail: "Telegram rejected this username as invalid."
+          detail: "Telegram rejected this username as invalid or reserved. It is not available as a free Basic username."
         };
       }
 
       // Network, authorization, server and unrecognized RPC errors must stop a
-      // scan. Counting them as ordinary occupied/unknown results hides failures.
+      // scan. They are not ordinary candidate results.
       throw new TelegramCheckError(
         "Telegram availability check failed for @" + username + ": " + message.slice(0, 240)
       );

@@ -1,5 +1,6 @@
 import type { Bot } from "grammy";
 import { config } from "../config.js";
+import { isSearchActive } from "../search/activity.js";
 import {
   markWatchedChecked,
   readWatchlist,
@@ -25,13 +26,14 @@ export function startReleaseMonitor(
   let stopped = false;
 
   const runCycle = async (): Promise<void> => {
-    if (running || stopped) return;
+    // Never compete with a foreground search for the same account's MTProto quota.
+    if (running || stopped || isSearchActive()) return;
     running = true;
 
     try {
       const entries = await readWatchlist();
       for (const entry of entries) {
-        if (stopped) break;
+        if (stopped || isSearchActive()) break;
 
         try {
           const result = await checker.check(entry.username);
@@ -85,7 +87,9 @@ export function startReleaseMonitor(
     }
   };
 
-  const initialTimer = setTimeout(() => void runCycle(), 60_000);
+  // Do not run a large 150-name cycle one minute after startup: that used to
+  // consume the same MTProto queue while the owner was doing a manual search.
+  const initialTimer = setTimeout(() => void runCycle(), config.watchIntervalMs);
   const intervalTimer = setInterval(() => void runCycle(), config.watchIntervalMs);
   initialTimer.unref();
   intervalTimer.unref();
