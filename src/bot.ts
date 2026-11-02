@@ -14,7 +14,7 @@ import { TelegramUsernameChecker } from "./telegram/checker.js";
 const mainKeyboard = new Keyboard()
   .text("🔎 Обычный поиск").text("⚡ Короткие 5–6")
   .row()
-  .text("4️⃣ Четыре символа").text("✅ Проверить имя")
+  .text("4️⃣ Правила 4 символов").text("✅ Проверить имя")
   .row()
   .text("👁 Список наблюдения").text("🛑 Остановить поиск")
   .row()
@@ -402,14 +402,14 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
   };
 
   const checkOneUsername = async (ctx: Context, raw: string) => {
+    if (!isOwner(ctx)) {
+      await ctx.reply("Проверка имени доступна только владельцу в личном чате бота.", { reply_markup: mainKeyboard });
+      return;
+    }
     if (isSearchActive()) {
       await ctx.reply("Сначала дождись окончания поиска или нажми «Остановить поиск». Ручная проверка не будет вставать в очередь рядом со сканированием.", {
         reply_markup: mainKeyboard
       });
-      return;
-    }
-    if (!isOwner(ctx)) {
-      await ctx.reply("Проверка имени доступна только владельцу в личном чате бота.", { reply_markup: mainKeyboard });
       return;
     }
     const username = raw.trim();
@@ -493,7 +493,7 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
   // Reply-keyboard buttons: no slash commands are required for normal use.
   bot.hears("🔎 Обычный поиск", async (ctx) => startSearch(ctx, "", "standard"));
   bot.hears("⚡ Короткие 5–6", async (ctx) => startSearch(ctx, "", "short"));
-  bot.hears("4️⃣ Четыре символа", async (ctx) => {
+  bot.hears("4️⃣ Правила 4 символов", async (ctx) => {
     await ctx.reply(fourCharacterInfo, { reply_markup: mainKeyboard });
   });
   bot.hears("👁 Список наблюдения", showWatchlist);
