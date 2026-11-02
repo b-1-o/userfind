@@ -255,8 +255,7 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
           "Диапазон: " + args.minLength + "–" + args.maxLength,
           "Приоритет: осмысленные слова, русская транслитерация, имена и фамилии.",
           "Время: до " + Math.round(config.searchDurationMs / 60_000) + " минут."
-        ].join("\n"),
-        { reply_markup: mainKeyboard }
+        ].join("\n")
       );
 
       const summary = await runDeepSearch(
@@ -273,7 +272,12 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
         },
         async (progress) => {
           if (Date.now() - lastEditAt < 25_000 || !statusMessage) return;
-          await ctx.api.editMessageText(chatId, statusMessage.message_id, progressText(progress));
+          try {
+            await ctx.api.editMessageText(chatId, statusMessage.message_id, progressText(progress));
+          } catch (error) {
+            // A progress-message edit must never abort the MTProto scan.
+            console.warn("Progress status update failed; continuing the search:", error);
+          }
           lastEditAt = Date.now();
         }
       );
@@ -356,12 +360,11 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      console.error("Search failed:", error);
+      // Do not try to edit the status message here: it may be immutable for
+      // Telegram-side reasons. Always deliver the original failure separately.
       try {
-        if (statusMessage) {
-          await ctx.api.editMessageText(chatId, statusMessage.message_id, "Ошибка поиска: " + message);
-        } else {
-          await ctx.api.sendMessage(chatId, "Ошибка поиска: " + message, { reply_markup: mainKeyboard });
-        }
+        await ctx.api.sendMessage(chatId, "Ошибка поиска: " + message, { reply_markup: mainKeyboard });
       } catch (deliveryError) {
         console.error("Could not send search error to owner:", deliveryError);
       }
