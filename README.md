@@ -21,13 +21,15 @@ Official references:
 
 - **Standard search**: meaningful candidates from 5–8 characters by default.
 - **Short search**: only 5–6 characters, with extra priority for five-character results.
-- **Four-character information mode**: explains why four-character names cannot be returned as free Basic usernames; they are not falsely checked or labelled free.
+- **Four-character rules**: explains why four-character names cannot be returned as free Basic usernames; this is informational, not an availability scan.
 
 The generator no longer emits arbitrary \`l → i\` substitutions or random syllable mashups. Candidate sources are visible in the results: English word, Russian transliteration, given name or surname.
 
 ## Telegram bot interface
 
-The bot displays a persistent reply keyboard. Use the buttons instead of memorizing slash commands:
+The bot displays a collapsible reply keyboard. It is not forced open; use Telegram's keyboard toggle to hide or show it. Use `/menu` to show the menu again.
+
+Use the buttons instead of memorizing slash commands:
 
 - 🔎 Ordinary search
 - ⚡ Short 5–6 search
@@ -68,10 +70,12 @@ Slash commands remain supported:
 - Length-sensitive scoring with lexical quality, pronunciation, balanced letter patterns, visual simplicity and name length.
 - One shared serialized MTProto request queue and configurable minimum delay, used by manual checks, deep searches and the release monitor.
 - Explicit handling for free, occupied, purchase-required, invalid and out-of-Basic-range names.
-- Flood-wait circuit breaker: Telegram rate limits stop further checks instead of triggering repeated requests.
+- Flood-wait circuit breaker: Telegram rate limits stop further checks instead of triggering repeated requests. The cooldown is saved locally and restored after a bot restart.
+- Foreground scans pause the release monitor; the first watch cycle waits the full configured six-hour interval rather than launching one minute after startup.
+- Telegram-invalid/reserved usernames are counted separately from network or unexpected errors.
 - Unexpected Telegram/network errors stop the current scan rather than silently turning them into ordinary free results.
 - Owner-only search/check/watchlist actions, limited to the configured owner's private chat.
-- Persistent reply keyboard so normal operation does not require slash commands.
+- Collapsible reply keyboard so normal operation does not require slash commands; `/menu` restores it.
 - Button-based one-name checking: tap the check button and send a username.
 - Stop button to cancel a running scan after its in-flight Telegram request finishes.
 - Chunked Telegram replies so a large result list does not exceed one-message limits.
