@@ -7,6 +7,8 @@ data/search-history.json
 data/search-history.json.tmp
 data/watchlist.json
 data/watchlist.json.tmp
+data/telegram-cooldown.json
+data/telegram-cooldown.json.*.tmp
 *.session
 *.log
 coverage/
