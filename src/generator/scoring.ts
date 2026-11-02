@@ -1,4 +1,11 @@
-export type CandidateSource = "dictionary" | "visual-mutation" | "brandable" | "constructed";
+export type CandidateSource =
+  | "dictionary"
+  | "russian-translit"
+  | "given-name"
+  | "surname"
+  | "visual-mutation"
+  | "brandable"
+  | "constructed";
 
 export interface ScoreBreakdown {
   total: number;
@@ -29,48 +36,63 @@ export function scoreCandidate(username: string, source: CandidateSource): Score
     }
   }
 
-  const idealVowelRatio = 0.38;
-  const vowelFit = Math.max(0, 100 - Math.abs(vowelRatio - idealVowelRatio) * 180);
-  const clusterPenalty = Math.max(0, longestConsonantRun - 2) * 19;
-  const pronunciation = Math.max(8, Math.min(100, vowelFit - clusterPenalty));
+  const vowelFit = Math.max(0, 100 - Math.abs(vowelRatio - 0.40) * 190);
+  const clusterPenalty = Math.max(0, longestConsonantRun - 2) * 22;
+  const pronunciation = Math.max(5, Math.min(100, vowelFit - clusterPenalty));
 
-  const duplicatePenalty = (1 - uniqueRatio) * 38;
+  const isPalindrome = name === [...name].reverse().join("");
+  const alternatesVowelsAndConsonants = chars.length > 3
+    && chars.every((char, index) => index === 0 || VOWELS.has(char) !== VOWELS.has(chars[index - 1]!));
+  const duplicatePenalty = (1 - uniqueRatio) * 34;
   const hasBalancedLetters = vowelCount > 0 && vowelCount < chars.length;
   const visual = Math.max(
-    10,
-    Math.min(100, 72 + (uniqueRatio * 22) + (hasBalancedLetters ? 8 : -12) - duplicatePenalty)
+    8,
+    Math.min(
+      100,
+      68
+        + (uniqueRatio * 23)
+        + (hasBalancedLetters ? 8 : -14)
+        + (isPalindrome ? 10 : 0)
+        + (alternatesVowelsAndConsonants ? 5 : 0)
+        - duplicatePenalty
+    )
   );
 
+  // Meaningful words and real name patterns dominate. Generated constructions
+  // remain supported for compatibility, but are intentionally scored low.
   const lexicalBySource: Record<CandidateSource, number> = {
     dictionary: 100,
-    "visual-mutation": 78,
-    brandable: 76,
-    constructed: 57
+    "russian-translit": 99,
+    "given-name": 98,
+    surname: 96,
+    "visual-mutation": 42,
+    brandable: 48,
+    constructed: 24
   };
   const lexical = lexicalBySource[source];
 
   const rarityByLength: Record<number, number> = {
     4: 100,
-    5: 94,
-    6: 86,
-    7: 76,
-    8: 66,
-    9: 56,
-    10: 48
+    5: 100,
+    6: 92,
+    7: 79,
+    8: 67,
+    9: 55,
+    10: 45
   };
-  const rarity = rarityByLength[name.length] ?? Math.max(25, 48 - Math.max(0, name.length - 10) * 3);
+  const rarity = rarityByLength[name.length] ?? Math.max(20, 45 - Math.max(0, name.length - 10) * 3);
 
   const brandability = Math.max(
-    8,
-    Math.min(100, pronunciation * 0.48 + visual * 0.32 + (source === "dictionary" ? 18 : 10))
+    5,
+    Math.min(100, pronunciation * 0.52 + visual * 0.38 + (lexical >= 90 ? 8 : 0))
   );
 
   const total = Math.round(
-    lexical * 0.28 +
-    pronunciation * 0.24 +
-    visual * 0.18 +
-    rarity * 0.18 +
-    brandability * 0.12
+    lexical * 0.42
+      + pronunciation * 0.22
+      + visual * 0.16
+      + rarity * 0.15
+      + brandability * 0.05
   );
 
   return {

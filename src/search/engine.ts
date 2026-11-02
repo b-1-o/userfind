@@ -1,4 +1,4 @@
-import { Candidate, generateCandidates } from "../generator/candidates.js";
+import { Candidate, generateCandidates, SearchMode } from "../generator/candidates.js";
 import {
   TelegramCheckError,
   TelegramFloodWaitError,
@@ -12,6 +12,7 @@ export interface SearchOptions {
   maxCandidates: number;
   watchCandidatesLimit: number;
   durationMs: number;
+  mode?: SearchMode;
   signal?: AbortSignal;
 }
 
@@ -52,7 +53,8 @@ export async function runDeepSearch(
   const candidates = await generateCandidates({
     minLength: options.minLength,
     maxLength: options.maxLength,
-    maxCandidates: options.maxCandidates
+    maxCandidates: options.maxCandidates,
+    mode: options.mode ?? "standard"
   });
 
   const progress: SearchProgress = {
@@ -82,8 +84,8 @@ export async function runDeepSearch(
       break;
     }
 
-    // Do not send four-character candidates to Telegram: the Basic API
-    // requires at least five characters and this bot does not query Fragment.
+    // Four-character names are excluded by the official Basic username rules.
+    // They are never sent to Telegram and never represented as free.
     if (candidate.username.length < 5) {
       progress.notBasicLength += 1;
       continue;
@@ -103,9 +105,8 @@ export async function runDeepSearch(
         progress.purchaseRequired += 1;
       } else if (check.status === "NOT_BASIC_LENGTH") {
         progress.notBasicLength += 1;
-      } else if (check.status === "INVALID") {
-        progress.unknown += 1;
       } else {
+        // INVALID and other unrecognized responses are never counted as free.
         progress.unknown += 1;
       }
     } catch (error) {
@@ -139,8 +140,16 @@ export async function runDeepSearch(
   }
 
   await onProgress?.({ ...progress });
-  results.sort((left, right) => right.score.total - left.score.total);
-  occupiedCandidates.sort((left, right) => right.score.total - left.score.total);
+  results.sort((left, right) =>
+    right.score.total - left.score.total
+    || left.username.length - right.username.length
+    || left.username.localeCompare(right.username)
+  );
+  occupiedCandidates.sort((left, right) =>
+    right.score.total - left.score.total
+    || left.username.length - right.username.length
+    || left.username.localeCompare(right.username)
+  );
 
   return {
     ...progress,

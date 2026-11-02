@@ -2,10 +2,18 @@ import { describe, expect, it } from "vitest";
 import { scoreCandidate } from "../src/generator/scoring.js";
 
 describe("scoreCandidate", () => {
-  it("ranks a dictionary word above a random-looking construction", () => {
+  it("ranks meaningful words and names above generated constructions", () => {
     const word = scoreCandidate("lumen", "dictionary");
+    const name = scoreCandidate("pavel", "given-name");
     const random = scoreCandidate("xqvzq", "constructed");
     expect(word.total).toBeGreaterThan(random.total);
+    expect(name.total).toBeGreaterThan(random.total);
+  });
+
+  it("gives five-character names a stronger short-name score than longer variants", () => {
+    const shortWord = scoreCandidate("dobro", "russian-translit");
+    const longerWord = scoreCandidate("radost", "russian-translit");
+    expect(shortWord.rarity).toBeGreaterThan(longerWord.rarity);
   });
 
   it("returns bounded integer scores", () => {

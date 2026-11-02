@@ -3,6 +3,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CandidateSource, ScoreBreakdown, scoreCandidate } from "./scoring.js";
 
+export type SearchMode = "standard" | "short";
+
 export interface Candidate {
   username: string;
   source: CandidateSource;
@@ -13,49 +15,47 @@ export interface CandidateOptions {
   minLength: number;
   maxLength: number;
   maxCandidates: number;
+  mode?: SearchMode;
 }
 
-const prefixes = [
-  "aero", "aura", "astra", "aure", "cora", "elio", "echo", "ely", "hera",
-  "ivor", "luma", "lyra", "mira", "nexa", "nori", "nova", "nyra", "onyx",
-  "ora", "orbi", "sora", "sola", "vanta", "vela", "vero", "vexa", "zora"
-];
+const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 
-const suffixes = [
-  "a", "ae", "ara", "elle", "en", "ia", "io", "is", "ix", "on", "ora",
-  "or", "ra", "um", "us", "va", "yn"
-];
+async function loadWordList(fileName: string): Promise<string[]> {
+  // Source mode resolves to ../../data; the production build resolves to ../data.
+  const paths = [
+    resolve(moduleDirectory, "../../data", fileName),
+    resolve(moduleDirectory, "../data", fileName)
+  ];
 
-const syllables = [
-  "aer", "ari", "ava", "bel", "cora", "dara", "ela", "elio", "era", "ira",
-  "ivo", "luma", "lyra", "mira", "nexa", "nora", "nori", "ora", "sela",
-  "sora", "vani", "vela", "vero", "vexa", "yara", "zora"
-];
-
-async function loadDictionary(): Promise<string[]> {
-  // Resolve relative to this module so both tsx development and the compiled
-  // dist/ build find the dictionary, regardless of the caller's working directory.
-  const path = resolve(dirname(fileURLToPath(import.meta.url)), "../../data/words-en.txt");
-  try {
-    const raw = await readFile(path, "utf8");
-    return raw.split(/\r?\n/).map((line) => line.trim().toLowerCase()).filter(Boolean);
-  } catch (error) {
-    console.error("Could not load the username dictionary at " + path + ":", error);
-    return [];
+  for (const path of paths) {
+    try {
+      const raw = await readFile(path, "utf8");
+      return raw
+        .split(/\r?\n/)
+        .map((line) => line.trim().toLowerCase())
+        .filter((line) => /^[a-z]{3,32}$/.test(line));
+    } catch {
+      // Try the next known source/build asset location.
+    }
   }
+
+  console.error("Could not load candidate word list: " + fileName);
+  return [];
 }
 
 function isCandidate(value: string): boolean {
-  return /^[a-z]{4,32}$/.test(value);
+  return /^[a-z]{5,32}$/.test(value);
 }
 
 export async function generateCandidates(options: CandidateOptions): Promise<Candidate[]> {
+  const mode = options.mode ?? "standard";
   const candidates = new Map<string, Candidate>();
 
-  const addExact = (raw: string, source: CandidateSource) => {
-    const username = raw.toLowerCase();
+  const add = (raw: string, source: CandidateSource) => {
+    const username = raw.toLowerCase().trim();
     if (!isCandidate(username)) return;
-    if (username.length < options.minLength || username.length > options.maxLength) return;
+    if (username.length < Math.max(5, options.minLength) || username.length > options.maxLength) return;
+    if (mode === "short" && username.length > 6) return;
     if (candidates.has(username)) return;
 
     candidates.set(username, {
@@ -65,44 +65,23 @@ export async function generateCandidates(options: CandidateOptions): Promise<Can
     });
   };
 
-  const add = (raw: string, source: CandidateSource) => {
-    const username = raw.toLowerCase();
-    addExact(username, source);
+  const lists: Array<[string, CandidateSource]> = [
+    ["words-en.txt", "dictionary"],
+    ["words-ru-latin.txt", "russian-translit"],
+    ["names-given.txt", "given-name"],
+    ["names-surname.txt", "surname"]
+  ];
 
-    if (source === "visual-mutation") return;
-
-    const positions = [...username]
-      .map((char, index) => char === "l" ? index : -1)
-      .filter((index) => index >= 0);
-
-    // Generate every non-empty combination of lowercase l -> i substitutions.
-    // Uppercase I is not a separate Telegram username because usernames are case-insensitive.
-    const combinations = 1 << Math.min(positions.length, 8);
-    for (let mask = 1; mask < combinations; mask += 1) {
-      const chars = [...username];
-      positions.forEach((position, bit) => {
-        if (bit < 8 && (mask & (1 << bit)) !== 0) chars[position] = "i";
-      });
-      addExact(chars.join(""), "visual-mutation");
-    }
-  };
-
-  const words = await loadDictionary();
-  for (const word of words) add(word, "dictionary");
-
-  for (const prefix of prefixes) {
-    for (const suffix of suffixes) {
-      add(prefix + suffix, "brandable");
-    }
-  }
-
-  for (const first of syllables) {
-    for (const second of syllables) {
-      add(first + second, "constructed");
-    }
+  for (const [fileName, source] of lists) {
+    const words = await loadWordList(fileName);
+    for (const word of words) add(word, source);
   }
 
   return [...candidates.values()]
-    .sort((left, right) => right.score.total - left.score.total || left.username.localeCompare(right.username))
+    .sort((left, right) =>
+      right.score.total - left.score.total
+      || left.username.length - right.username.length
+      || left.username.localeCompare(right.username)
+    )
     .slice(0, options.maxCandidates);
 }

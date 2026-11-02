@@ -17,10 +17,13 @@ jobs:
       - run: npm install
       - run: npm run typecheck
       - run: npm run build
-      - name: Verify production artifact excludes tests
+      - name: Verify production artifact excludes tests and includes every word list
         run: |
           test -f dist/index.js
           test -f dist/data/words-en.txt
+          test -f dist/data/words-ru-latin.txt
+          test -f dist/data/names-given.txt
+          test -f dist/data/names-surname.txt
           test ! -d dist/tests
       - run: npm test
       - name: Audit production and development dependencies

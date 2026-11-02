@@ -1,5 +1,6 @@
-import { Bot, Context } from "grammy";
+import { Bot, Context, Keyboard } from "grammy";
 import { config, requireBotToken } from "./config.js";
+import { SearchMode } from "./generator/candidates.js";
 import { SearchProgress, runDeepSearch } from "./search/engine.js";
 import { appendSearchHistory } from "./storage/result-store.js";
 import {
@@ -9,37 +10,59 @@ import {
 } from "./storage/watch-store.js";
 import { TelegramUsernameChecker } from "./telegram/checker.js";
 
+const mainKeyboard = new Keyboard()
+  .text("🔎 Обычный поиск").text("⚡ Короткие 5–6")
+  .row()
+  .text("4️⃣ Четыре символа").text("✅ Проверить имя")
+  .row()
+  .text("👁 Список наблюдения").text("🛑 Остановить поиск")
+  .row()
+  .text("🆔 Мой ID").text("ℹ️ Помощь")
+  .resized()
+  .persistent();
+
 function isOwner(ctx: Context): boolean {
   const userId = ctx.from?.id;
-  // Never send private scan results into a group, even when the owner sends the command there.
+  // Never send private scan results into a group, even when the owner sends a button there.
   return ctx.chat?.type === "private"
     && typeof userId === "number"
     && config.allowedUserIds.has(userId);
 }
 
-function parseFindArguments(raw: string): { minLength: number; maxLength: number; resultLimit: number } {
+function parseFindArguments(
+  raw: string,
+  mode: SearchMode
+): { minLength: number; maxLength: number; resultLimit: number; mode: SearchMode } {
   const trimmed = raw.trim();
   if (!trimmed) {
-    return { minLength: 5, maxLength: 8, resultLimit: config.maxResults };
+    return {
+      minLength: 5,
+      maxLength: mode === "short" ? 6 : 8,
+      resultLimit: config.maxResults,
+      mode
+    };
   }
 
   const match = trimmed.match(/^([0-9]{1,2})\s*-\s*([0-9]{1,2})(?:\s+([0-9]{1,2}))?$/);
   if (!match) {
-    throw new Error("Use /find 5-8 or /find 5-8 20. The last number is the maximum results.");
+    throw new Error("Укажи диапазон, например 5-8 или 5-6 20. Минимальная длина бесплатного Basic username — 5 символов.");
   }
 
   const minLength = Number(match[1]);
   const maxLength = Number(match[2]);
   const requestedLimit = match[3] ? Number(match[3]) : config.maxResults;
 
-  if (minLength < 4 || maxLength > 32 || minLength > maxLength || maxLength < 5) {
-    throw new Error("Free Basic Telegram usernames must be 5–32 characters. Use /find 5-8; four-character names cannot be checked as free Basic usernames.");
+  if (minLength < 5 || maxLength > 32 || minLength > maxLength || maxLength < 5) {
+    throw new Error("Бесплатные Basic usernames имеют длину 5–32 символа. Четырёхсимвольные имена нельзя подтвердить как бесплатные Basic usernames.");
+  }
+  if (mode === "short" && maxLength > 6) {
+    throw new Error("В коротком режиме доступны только имена длиной 5–6 символов.");
   }
   if (requestedLimit < 1 || requestedLimit > 50) {
-    throw new Error("Result limit must be between 1 and 50.");
+    throw new Error("Количество результатов должно быть от 1 до 50.");
   }
 
-  return { minLength, maxLength, resultLimit: requestedLimit };
+  return { minLength, maxLength, resultLimit: requestedLimit, mode };
 }
 
 export function splitTelegramText(text: string, maxLength = 3_500): string[] {
@@ -72,7 +95,7 @@ export function splitTelegramText(text: string, maxLength = 3_500): string[] {
 
 async function replyLongText(ctx: Context, text: string): Promise<void> {
   const chunks = splitTelegramText(text);
-  await ctx.reply(chunks[0]!);
+  await ctx.reply(chunks[0]!, { reply_markup: mainKeyboard });
   for (const chunk of chunks.slice(1)) {
     await ctx.api.sendMessage(ctx.chat!.id, chunk);
   }
@@ -80,183 +103,142 @@ async function replyLongText(ctx: Context, text: string): Promise<void> {
 
 function progressText(progress: SearchProgress): string {
   return [
-    "UserFind Deep Hunt is running…",
-    "Checked: " + progress.checked,
-    "Free and confirmed: " + progress.available,
-    "Occupied: " + progress.occupied,
-    "Fragment purchase required: " + progress.purchaseRequired,
-    "Unknown/errors: " + progress.unknown,
-    "Four-character names outside Basic rules: " + progress.notBasicLength,
+    "UserFind — поиск выполняется…",
+    "Проверено: " + progress.checked,
+    "Свободны и подтверждены: " + progress.available,
+    "Заняты: " + progress.occupied,
+    "Требуют покупки: " + progress.purchaseRequired,
+    "Неизвестно / ошибки: " + progress.unknown,
+    "Вне Basic (4 символа): " + progress.notBasicLength,
     "",
-    "All MTProto checks share one sequential rate limiter."
+    "Все MTProto-проверки проходят через одну последовательную очередь."
   ].join("\n");
 }
 
 function formatStatus(status: string): string {
   const labels: Record<string, string> = {
-    AVAILABLE: "FREE BASIC — Telegram confirmed available at check time",
-    OCCUPIED: "OCCUPIED",
-    PURCHASE_REQUIRED: "NOT FREE — Telegram says it can be purchased through Fragment",
-    NOT_BASIC_LENGTH: "NOT A FREE BASIC USERNAME — four characters are below the 5-character minimum",
-    INVALID: "INVALID",
-    UNKNOWN: "UNKNOWN — not treated as available"
+    AVAILABLE: "СВОБОДЕН BASIC — Telegram подтвердил доступность на момент проверки",
+    OCCUPIED: "ЗАНЯТ",
+    PURCHASE_REQUIRED: "НЕ БЕСПЛАТНЫЙ — Telegram сообщает, что имя доступно только для покупки",
+    NOT_BASIC_LENGTH: "НЕ BASIC — минимальная длина бесплатного Basic username составляет 5 символов",
+    INVALID: "НЕДОПУСТИМЫЙ USERNAME",
+    UNKNOWN: "НЕИЗВЕСТНО — не считается свободным"
   };
   return labels[status] ?? status;
 }
 
+function sourceLabel(source: string): string {
+  const labels: Record<string, string> = {
+    dictionary: "английское слово",
+    "russian-translit": "русское слово в латинице",
+    "given-name": "имя",
+    surname: "фамилия",
+    "visual-mutation": "вариант написания",
+    brandable: "брендовая комбинация",
+    constructed: "составное имя"
+  };
+  return labels[source] ?? source;
+}
+
+const fourCharacterInfo = [
+  "Режим четырёхсимвольных имён",
+  "",
+  "Здесь есть ограничение самого Telegram: бесплатный Basic username должен содержать 5–32 символа.",
+  "Поэтому имя из 4 символов нельзя подтвердить как свободное Basic-имя через официальный метод проверки.",
+  "Я не буду помечать такие варианты как бесплатные или обещать, что их можно забрать.",
+  "",
+  "Чтобы найти максимально короткое свободное имя, используй режим «Короткие 5–6»."
+].join("\n");
+
 export function createBot(checker: TelegramUsernameChecker): Bot {
   const bot = new Bot(requireBotToken());
   let activeSearchController: AbortController | null = null;
+  const pendingUsernameChecks = new Set<number>();
 
-  bot.command("start", async (ctx) => {
+  const showHelp = async (ctx: Context) => {
     await ctx.reply(
       [
-        "UserFind — quality-first Telegram username discovery.",
+        "UserFind — поиск коротких и осмысленных Telegram username.",
         "",
-        "I rank meaningful words and brandable names first, then verify them with Telegram.",
-        "Only Telegram-confirmed free Basic usernames are reported as available.",
+        "Кнопки внизу:",
+        "🔎 Обычный поиск — имена 5–8 символов.",
+        "⚡ Короткие 5–6 — в первую очередь самые короткие осмысленные слова и имена.",
+        "4️⃣ Четыре символа — объяснение ограничений Telegram.",
+        "✅ Проверить имя — проверить один username.",
+        "👁 Список наблюдения — занятые имена, которые перепроверяются.",
+        "🛑 Остановить поиск — остановить текущий поиск.",
+        "🆔 Мой ID — показать числовой ID.",
         "",
-        "Commands:",
-        "/find — deep search (default lengths 5–8)",
-        "/find 5-7 15 — choose length range and result count",
-        "/check username — check one name",
-        "/cancel — stop the active search",
-        "/watchlist — names monitored for future release",
-        "/unwatch username — stop monitoring a name",
-        "/id — show your Telegram numeric ID",
-        "/help — help",
+        "Генератор использует английские слова, транслитерацию русских слов, имена и фамилии.",
+        "Свободным результат считается только после подтверждения Telegram. Покупка через Fragment и неизвестные статусы не считаются свободными.",
         "",
-        "Four-character names are not eligible for free Basic usernames; their Fragment status is not checked here."
-      ].join("\n")
+        "Слэш-команды тоже поддерживаются: /find, /short, /check, /cancel, /watchlist, /unwatch, /id, /four."
+      ].join("\n"),
+      { reply_markup: mainKeyboard }
     );
-  });
+  };
 
-  bot.command("id", async (ctx) => {
-    await ctx.reply("Your Telegram user ID: " + String(ctx.from?.id ?? "unknown"));
-  });
-
-  bot.command("help", async (ctx) => {
-    await ctx.reply(
-      [
-        "UserFind commands",
-        "",
-        "/find — search lengths 5–8",
-        "/find 5-7 20 — search lengths 5–7 and return up to 20 matches",
-        "/check @username — check one username",
-        "/cancel — cancel the active deep search",
-        "/watchlist — see occupied names monitored for release",
-        "/unwatch username — remove a name from monitoring",
-        "/id — show your numeric Telegram user ID",
-        "",
-        "A name is shown as FREE only if Telegram's account.checkUsername returns true.",
-        "USERNAME_PURCHASE_AVAILABLE is never counted as free.",
-        "Occupied high-quality candidates are monitored and rechecked every few hours.",
-        "A successful check does not reserve the username; claim it immediately in Telegram."
-      ].join("\n")
-    );
-  });
-
-  bot.command("watchlist", async (ctx) => {
+  const showWatchlist = async (ctx: Context) => {
     if (!isOwner(ctx)) {
-      await ctx.reply("This command is available only in the bot's private chat for the configured owner.");
+      await ctx.reply("Список наблюдения доступен только владельцу в личном чате.", { reply_markup: mainKeyboard });
       return;
     }
 
     const entries = await readWatchlist();
     if (!entries.length) {
-      await ctx.reply("Your release watchlist is empty. Run /find to discover and track high-quality occupied candidates.");
+      await ctx.reply("Список наблюдения пуст. Запусти поиск, чтобы добавить качественные занятые имена.", { reply_markup: mainKeyboard });
       return;
     }
 
     const lines = [
-      "Release watchlist",
-      "These names were confirmed occupied. UserFind rechecks them periodically; it does not infer inactivity."
+      "Список наблюдения",
+      "Эти имена ранее были подтверждены как занятые. UserFind периодически проверяет их снова; неактивность аккаунта не предполагается."
     ];
     entries.slice(0, 40).forEach((entry, index) => {
       lines.push(
         "",
-        (index + 1) + ". @" + entry.username + " — quality " + entry.score + "/100",
-        "Added: " + entry.addedAt
+        (index + 1) + ". @" + entry.username + " — качество " + entry.score + "/100",
+        "Добавлено: " + entry.addedAt
       );
     });
-    if (entries.length > 40) lines.push("", "Showing 40 of " + entries.length + " tracked names.");
-    lines.push("", "Use /unwatch username to remove one.");
+    if (entries.length > 40) lines.push("", "Показано 40 из " + entries.length + ".");
+    lines.push("", "Для удаления используй /unwatch username.");
     await replyLongText(ctx, lines.join("\n"));
-  });
+  };
 
-  bot.command("unwatch", async (ctx) => {
+  const cancelSearch = async (ctx: Context) => {
+    pendingUsernameChecks.delete(ctx.from?.id ?? -1);
     if (!isOwner(ctx)) {
-      await ctx.reply("This command is available only in the bot's private chat for the configured owner.");
+      await ctx.reply("Остановка поиска доступна только владельцу в личном чате.", { reply_markup: mainKeyboard });
       return;
     }
-
-    const username = String(ctx.match ?? "").trim().replace(/^@/, "").toLowerCase();
-    if (!username) {
-      await ctx.reply("Usage: /unwatch username");
-      return;
-    }
-
-    const removed = await removeWatchedUsername(username);
-    await ctx.reply(removed ? "Removed @" + username + " from the release watchlist." : "@" + username + " was not on the watchlist.");
-  });
-
-  bot.command("check", async (ctx) => {
-    if (!isOwner(ctx)) {
-      await ctx.reply("This command is available only in the bot's private chat for the configured owner.");
-      return;
-    }
-
-    const username = String(ctx.match ?? "").trim();
-    if (!username) {
-      await ctx.reply("Usage: /check username");
-      return;
-    }
-
-    try {
-      const result = await checker.check(username);
-      await ctx.reply(
-        "@" + result.username + "\n" +
-        formatStatus(result.status) + "\n" +
-        result.detail + "\n" +
-        "Checked: " + result.checkedAt
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await ctx.reply("Check stopped: " + message);
-    }
-  });
-
-  bot.command("cancel", async (ctx) => {
-    if (!isOwner(ctx)) {
-      await ctx.reply("This command is available only in the bot's private chat for the configured owner.");
-      return;
-    }
-
     if (!activeSearchController) {
-      await ctx.reply("There is no active search to cancel.");
+      await ctx.reply("Сейчас поиск не запущен.", { reply_markup: mainKeyboard });
       return;
     }
-
     activeSearchController.abort();
-    await ctx.reply("Cancellation requested. The current Telegram request will finish safely; no further usernames will be checked.");
-  });
+    await ctx.reply("Запрос на остановку принят. Текущий запрос Telegram завершится безопасно, после него новые имена проверяться не будут.", {
+      reply_markup: mainKeyboard
+    });
+  };
 
-  bot.command("find", async (ctx) => {
+  const startSearch = async (ctx: Context, raw: string, mode: SearchMode) => {
     if (!isOwner(ctx)) {
-      await ctx.reply("This command is available only in the bot's private chat for the configured owner.");
+      await ctx.reply("Поиск доступен только владельцу в личном чате бота.", { reply_markup: mainKeyboard });
       return;
     }
-
     if (activeSearchController) {
-      await ctx.reply("A deep search is already running. Use /cancel before starting another.");
+      await ctx.reply("Поиск уже выполняется. Нажми «Остановить поиск», прежде чем запускать новый.", { reply_markup: mainKeyboard });
       return;
     }
 
     let args: ReturnType<typeof parseFindArguments>;
     try {
-      args = parseFindArguments(String(ctx.match ?? ""));
+      args = parseFindArguments(raw, mode);
     } catch (error) {
-      await ctx.reply(error instanceof Error ? error.message : "Invalid search arguments.");
+      await ctx.reply(error instanceof Error ? error.message : "Некорректные параметры поиска.", {
+        reply_markup: mainKeyboard
+      });
       return;
     }
 
@@ -268,7 +250,13 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
 
     try {
       statusMessage = await ctx.reply(
-        "Preparing candidates…\nRange: " + args.minLength + "–" + args.maxLength + "\nTime budget: up to 10 minutes."
+        [
+          mode === "short" ? "Подготовка короткого поиска…" : "Подготовка обычного поиска…",
+          "Диапазон: " + args.minLength + "–" + args.maxLength,
+          "Приоритет: осмысленные слова, русская транслитерация, имена и фамилии.",
+          "Время: до " + Math.round(config.searchDurationMs / 60_000) + " минут."
+        ].join("\n"),
+        { reply_markup: mainKeyboard }
       );
 
       const summary = await runDeepSearch(
@@ -280,6 +268,7 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
           maxCandidates: config.maxCandidates,
           watchCandidatesLimit: config.watchMaxEntries,
           durationMs: config.searchDurationMs,
+          mode,
           signal: controller.signal
         },
         async (progress) => {
@@ -294,7 +283,7 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
         await appendSearchHistory(summary);
       } catch (error) {
         console.error("Could not save search history:", error);
-        storageWarnings.push("Search history could not be saved.");
+        storageWarnings.push("Историю поиска не удалось сохранить.");
       }
 
       let watchedCount = 0;
@@ -302,67 +291,65 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
         watchedCount = await mergeWatchedCandidates(summary.occupiedCandidates, config.watchMaxEntries);
       } catch (error) {
         console.error("Could not update release watchlist:", error);
-        storageWarnings.push("Release watchlist could not be updated.");
+        storageWarnings.push("Список наблюдения не удалось обновить.");
       }
 
+      const modeLabel = mode === "short" ? "Короткий поиск (5–6)" : "Обычный поиск (5–8 по умолчанию)";
       const lines = [
-        "UserFind Deep Hunt finished",
+        "UserFind — поиск завершён",
         "",
-        "Checked: " + summary.checked,
-        "Confirmed free: " + summary.available,
-        "Occupied: " + summary.occupied,
-        "Fragment purchase required (not free): " + summary.purchaseRequired,
-        "Unknown/errors: " + summary.unknown,
-        "Four-character names outside Basic rules: " + summary.notBasicLength,
-        "Generated candidates: " + summary.candidatesGenerated,
-        "Names kept under release monitoring: " + watchedCount,
-        "Recheck interval: " + Math.round(config.watchIntervalMs / 3_600_000) + " hours",
-        "Elapsed: " + Math.round(summary.elapsedMs / 1000) + " seconds"
+        "Режим: " + modeLabel,
+        "Проверено: " + summary.checked,
+        "Подтверждённо свободны: " + summary.available,
+        "Заняты: " + summary.occupied,
+        "Требуют покупки (не бесплатные): " + summary.purchaseRequired,
+        "Неизвестно / ошибки: " + summary.unknown,
+        "Вне Basic (4 символа): " + summary.notBasicLength,
+        "Кандидатов сгенерировано: " + summary.candidatesGenerated,
+        "Добавлено в список наблюдения: " + watchedCount,
+        "Интервал перепроверки: " + Math.round(config.watchIntervalMs / 3_600_000) + " ч.",
+        "Время: " + Math.round(summary.elapsedMs / 1000) + " сек."
       ];
 
       if (summary.stopReason === "telegram_flood_wait") {
-        lines.push("Stopped because Telegram requested FLOOD_WAIT (" + summary.floodWaitSeconds + " seconds). All further checks are paused; no limit bypass was attempted.");
+        lines.push("Остановлено по FLOOD_WAIT (" + summary.floodWaitSeconds + " сек.). Проверки не ускорялись и не обходили лимиты Telegram.");
       } else if (summary.stopReason === "telegram_error") {
-        lines.push("Stopped because the Telegram check failed: " + (summary.errorMessage ?? "unknown API error"));
+        lines.push("Остановлено из-за ошибки Telegram: " + (summary.errorMessage ?? "неизвестная ошибка"));
       } else if (summary.stopReason === "time_budget_reached") {
-        lines.push("Stopped at the configured time budget.");
+        lines.push("Остановлено по ограничению времени.");
       } else if (summary.stopReason === "cancelled") {
-        lines.push("Search cancelled by the owner. The in-flight request, if any, was allowed to finish.");
+        lines.push("Поиск остановлен владельцем.");
+      } else {
+        lines.push("Кандидаты закончились.");
       }
 
-      if (storageWarnings.length) {
-        lines.push("", ...storageWarnings);
-      }
+      if (storageWarnings.length) lines.push("", ...storageWarnings);
 
       if (summary.results.length) {
-        lines.push("", "Best Telegram-confirmed free results:");
+        lines.push("", "Лучшие результаты, подтверждённые Telegram как свободные:");
         summary.results.forEach((result, index) => {
           lines.push(
             "",
-            String(index + 1) + ". @" + result.username + " — quality " + result.score.total + "/100",
-            "Source: " + result.source + " | checked " + result.checkedAt,
+            (index + 1) + ". @" + result.username + " — качество " + result.score.total + "/100",
+            "Тип: " + sourceLabel(result.source) + " | проверено: " + result.checkedAt,
             "https://t.me/" + result.username
           );
         });
-        lines.push("", "These checks do not reserve the names. Open Telegram and claim a result immediately; availability can change.");
+        lines.push("", "Проверка не резервирует имя. Статус может измениться сразу после ответа Telegram.");
       } else {
-        lines.push("", "No free username was confirmed in this run. Unknown and purchase-required names were not counted as free.");
-      }
-
-      if (args.minLength === 4) {
-        lines.push("", "Four-character candidates were excluded from free results: Telegram's Basic username checker requires at least five characters. This bot does not verify their Fragment NFT listings.");
+        lines.push("", "В этом запуске не подтверждено ни одного свободного Basic username. Неизвестные и платные варианты не считаются свободными.");
       }
 
       const chunks = splitTelegramText(lines.join("\n"));
-      if (!statusMessage) {
-        await ctx.api.sendMessage(chatId, chunks[0]!);
-      } else {
+      if (statusMessage) {
         try {
           await ctx.api.editMessageText(chatId, statusMessage.message_id, chunks[0]!);
         } catch (editError) {
           console.error("Could not edit search status message; sending a new message:", editError);
-          await ctx.api.sendMessage(chatId, chunks[0]!);
+          await ctx.api.sendMessage(chatId, chunks[0]!, { reply_markup: mainKeyboard });
         }
+      } else {
+        await ctx.api.sendMessage(chatId, chunks[0]!, { reply_markup: mainKeyboard });
       }
       for (const chunk of chunks.slice(1)) {
         await ctx.api.sendMessage(chatId, chunk);
@@ -371,9 +358,9 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
       const message = error instanceof Error ? error.message : String(error);
       try {
         if (statusMessage) {
-          await ctx.api.editMessageText(chatId, statusMessage.message_id, "Search failed: " + message);
+          await ctx.api.editMessageText(chatId, statusMessage.message_id, "Ошибка поиска: " + message);
         } else {
-          await ctx.api.sendMessage(chatId, "Search failed: " + message);
+          await ctx.api.sendMessage(chatId, "Ошибка поиска: " + message, { reply_markup: mainKeyboard });
         }
       } catch (deliveryError) {
         console.error("Could not send search error to owner:", deliveryError);
@@ -381,6 +368,125 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
     } finally {
       if (activeSearchController === controller) activeSearchController = null;
     }
+  };
+
+  const checkOneUsername = async (ctx: Context, raw: string) => {
+    if (!isOwner(ctx)) {
+      await ctx.reply("Проверка имени доступна только владельцу в личном чате бота.", { reply_markup: mainKeyboard });
+      return;
+    }
+    const username = raw.trim();
+    if (!username) {
+      await ctx.reply("Отправь username без ссылки, например pavel или dobro.", { reply_markup: mainKeyboard });
+      return;
+    }
+    try {
+      const result = await checker.check(username);
+      await ctx.reply(
+        "@" + result.username + "\n"
+          + formatStatus(result.status) + "\n"
+          + result.detail + "\n"
+          + "Проверено: " + result.checkedAt,
+        { reply_markup: mainKeyboard }
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await ctx.reply("Проверка остановлена: " + message, { reply_markup: mainKeyboard });
+    }
+  };
+
+  bot.command("start", async (ctx) => {
+    await ctx.reply(
+      [
+        "UserFind — поиск коротких и осмысленных Telegram username.",
+        "",
+        "Используй кнопки под полем ввода: обычный поиск, короткий поиск, проверка одного имени и список наблюдения.",
+        "",
+        "Свободными считаются только имена, подтверждённые Telegram. Неизвестные и требующие покупки варианты исключаются."
+      ].join("\n"),
+      { reply_markup: mainKeyboard }
+    );
+  });
+
+  bot.command("id", async (ctx) => {
+    await ctx.reply("Твой Telegram user ID: " + String(ctx.from?.id ?? "unknown"), {
+      reply_markup: mainKeyboard
+    });
+  });
+
+  bot.command("help", showHelp);
+  bot.command("four", async (ctx) => {
+    await ctx.reply(fourCharacterInfo, { reply_markup: mainKeyboard });
+  });
+  bot.command("find", async (ctx) => {
+    await startSearch(ctx, String(ctx.match ?? ""), "standard");
+  });
+  bot.command("short", async (ctx) => {
+    await startSearch(ctx, String(ctx.match ?? ""), "short");
+  });
+
+  bot.command("watchlist", showWatchlist);
+
+  bot.command("unwatch", async (ctx) => {
+    if (!isOwner(ctx)) {
+      await ctx.reply("Эта команда доступна только владельцу в личном чате.", { reply_markup: mainKeyboard });
+      return;
+    }
+    const username = String(ctx.match ?? "").trim().replace(/^@/, "").toLowerCase();
+    if (!username) {
+      await ctx.reply("Укажи имя: /unwatch username", { reply_markup: mainKeyboard });
+      return;
+    }
+    const removed = await removeWatchedUsername(username);
+    await ctx.reply(
+      removed ? "@" + username + " удалён из списка наблюдения." : "@" + username + " не найден в списке.",
+      { reply_markup: mainKeyboard }
+    );
+  });
+
+  bot.command("check", async (ctx) => {
+    await checkOneUsername(ctx, String(ctx.match ?? ""));
+  });
+
+  bot.command("cancel", cancelSearch);
+
+  // Reply-keyboard buttons: no slash commands are required for normal use.
+  bot.hears("🔎 Обычный поиск", async (ctx) => startSearch(ctx, "", "standard"));
+  bot.hears("⚡ Короткие 5–6", async (ctx) => startSearch(ctx, "", "short"));
+  bot.hears("4️⃣ Четыре символа", async (ctx) => {
+    await ctx.reply(fourCharacterInfo, { reply_markup: mainKeyboard });
+  });
+  bot.hears("👁 Список наблюдения", showWatchlist);
+  bot.hears("🛑 Остановить поиск", cancelSearch);
+  bot.hears("🆔 Мой ID", async (ctx) => {
+    await ctx.reply("Твой Telegram user ID: " + String(ctx.from?.id ?? "unknown"), {
+      reply_markup: mainKeyboard
+    });
+  });
+  bot.hears("ℹ️ Помощь", showHelp);
+  bot.hears("✅ Проверить имя", async (ctx) => {
+    if (!isOwner(ctx)) {
+      await ctx.reply("Проверка имени доступна только владельцу в личном чате.", { reply_markup: mainKeyboard });
+      return;
+    }
+    pendingUsernameChecks.add(ctx.from!.id);
+    await ctx.reply("Отправь одно имя отдельным сообщением, например: pavel, durov, erik, dobro или sokol.", {
+      reply_markup: mainKeyboard
+    });
+  });
+
+  bot.on("message:text", async (ctx, next) => {
+    const userId = ctx.from?.id;
+    if (!userId || !pendingUsernameChecks.has(userId)) {
+      await next();
+      return;
+    }
+    pendingUsernameChecks.delete(userId);
+    if (!isOwner(ctx)) {
+      await ctx.reply("Проверка имени доступна только владельцу в личном чате.", { reply_markup: mainKeyboard });
+      return;
+    }
+    await checkOneUsername(ctx, ctx.message.text);
   });
 
   bot.catch((error) => {
@@ -393,12 +499,14 @@ export function createBot(checker: TelegramUsernameChecker): Bot {
 export async function startBot(bot: Bot): Promise<void> {
   await bot.api.setMyCommands([
     { command: "start", description: "Start UserFind" },
-    { command: "find", description: "Find free usernames" },
+    { command: "find", description: "Standard search for free usernames" },
+    { command: "short", description: "Short meaningful usernames (5–6)" },
+    { command: "four", description: "Why four-character names are not Basic" },
     { command: "check", description: "Check one username" },
     { command: "cancel", description: "Cancel the active search" },
     { command: "watchlist", description: "Show watched occupied usernames" },
     { command: "unwatch", description: "Remove a username from monitoring" },
-    { command: "id", description: "Show your numeric Telegram ID" },
+    { command: "id", description: "Show your numeric Telegram user ID" },
     { command: "help", description: "Show help" }
   ]);
 
