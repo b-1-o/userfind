@@ -1,3 +1,7 @@
+import { randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { TelegramClient } from "teleproto";
 import {
@@ -8,9 +12,10 @@ import {
   TelegramUsernameChecker
 } from "../src/telegram/checker.js";
 
-function makeChecker(invoke: ReturnType<typeof vi.fn>) {
+function makeChecker(invoke: ReturnType<typeof vi.fn>, cooldownPath?: string) {
   const client = { invoke } as unknown as TelegramClient;
-  return new TelegramUsernameChecker(client, 0);
+  const path = cooldownPath ?? resolve(tmpdir(), "userfind-test-" + randomUUID() + ".json");
+  return new TelegramUsernameChecker(client, 0, path);
 }
 
 describe("Telegram checker helpers", () => {
@@ -81,15 +86,24 @@ describe("TelegramUsernameChecker.check", () => {
     await expect(checker.check("lumen")).rejects.toBeInstanceOf(TelegramCheckError);
   });
 
-  it("parses flood-wait seconds and blocks queued calls", async () => {
+  it("persists FLOOD_WAIT and restores it after a checker restart", async () => {
+    const path = resolve(tmpdir(), "userfind-cooldown-" + randomUUID() + ".json");
     const invoke = vi.fn().mockRejectedValue(new Error("FLOOD_WAIT_127"));
-    const checker = makeChecker(invoke);
+    const client = { invoke } as unknown as TelegramClient;
+    const checker = new TelegramUsernameChecker(client, 0, path);
 
-    await expect(checker.check("lumen")).rejects.toMatchObject({
-      waitSeconds: 127
-    });
-    await expect(checker.check("velvet")).rejects.toBeInstanceOf(TelegramFloodWaitError);
+    await expect(checker.check("lumen")).rejects.toMatchObject({ waitSeconds: 127 });
+
+    const firstStatus = await checker.getCooldownStatus();
+    expect(firstStatus.waitSeconds).toBeGreaterThan(0);
+
+    const restartedChecker = new TelegramUsernameChecker(client, 0, path);
+    const restartedStatus = await restartedChecker.getCooldownStatus();
+    expect(restartedStatus.waitSeconds).toBeGreaterThan(0);
+
+    await expect(restartedChecker.check("velvet")).rejects.toBeInstanceOf(TelegramFloodWaitError);
     expect(invoke).toHaveBeenCalledTimes(1);
+    await rm(path, { force: true });
   });
 
   it("serializes concurrent calls through one request queue", async () => {
@@ -98,7 +112,7 @@ describe("TelegramUsernameChecker.check", () => {
     const invoke = vi.fn(async () => {
       active += 1;
       maximumActive = Math.max(maximumActive, active);
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 5));
       active -= 1;
       return true;
     });
